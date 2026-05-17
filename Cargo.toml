@@ -1,0 +1,51 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/hodl-core",
+    "crates/hodl-wallet",
+    "crates/hodl-sequencer",
+    "crates/hodl-node",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[workspace.dependencies]
+hodl-core = { path = "crates/hodl-core" }
+
+# Bitcoin
+bitcoin = { version = "0.32", features = ["serde", "rand-std"] }
+bitcoincore-rpc = "0.19"
+secp256k1 = { version = "0.29", features = ["serde", "rand-std", "global-context"] }
+
+# Async / HTTP
+tokio = { version = "1", features = ["full"] }
+axum = "0.7"
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+
+# Serde / encoding
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+hex = "0.4"
+
+# Hashing
+sha2 = "0.10"
+
+# CLI / config
+clap = { version = "4", features = ["derive", "env"] }
+anyhow = "1"
+thiserror = "1"
+
+# Storage
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"

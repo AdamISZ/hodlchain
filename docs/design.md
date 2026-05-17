@@ -1,0 +1,322 @@
+# hodlcoin POC — design notes
+
+Companion to `issuancev2.tex`. Captures the v0 implementation decisions; the paper specifies the issuance primitive itself.
+
+## Scope
+
+A proof-of-concept of the issuance mechanism in `issuance.tex`, on Bitcoin **regtest** and **signet**, comprising:
+
+- A minimal Bitcoin CLI wallet that can build CLTV-locked mint UTXOs and produce mint messages.
+- A primitive **single-sequencer** L2 that orders mint outcomes and transfers into blocks.
+- L2 nodes that follow the sequencer by reading L1 OP_RETURN attestations and fetching block bodies from the sequencer.
+
+Out of scope for v0:
+
+- Multi-sequencer consensus, fault proofs, decentralised sequencing.
+- Pegs (BTC does not move into/out of the L2).
+- Fees on L2 (no fee market).
+- Anonymity (deferred; the mint code is structured so a future ring-proof or ZK-proof variant of `MintProofEnvelope` can plug in without changing block format — see "Mint witness pluggability" below).
+
+In scope (now implemented):
+
+- Bitcoin-style retargeting of `r` (see "Retargeting" below). `r` is consensus state.
+
+## Stack
+
+- **Language**: Rust (edition 2021), single Cargo workspace.
+- **L1 access**: `bitcoincore-rpc` against a local `bitcoind` running regtest or signet. Wallet is a thin CLI; key custody is in our code, but UTXO scanning, fee estimation and broadcast are delegated to the node.
+- **Bitcoin primitives**: `bitcoin` 0.32 (Taproot, Schnorr, scripts), `secp256k1` 0.29.
+- **L2 daemons**: tokio + axum for HTTP, reqwest for client calls between wallet/node and sequencer.
+- **Storage**: SQLite (`rusqlite`, bundled) — the sequencer's tx-pool and consumed-nullifier set, the node's view of L2 state.
+- **L2 sig scheme**: BIP340 Schnorr / secp256k1, same curve as Bitcoin Taproot keys.
+
+## Crate layout
+
+```
+crates/
+├── hodl-core       # lib: consensus, types, codecs, MintProof trait
+├── hodl-wallet     # bin: end-user CLI (keygen, mint UTXO, mint message, transfer, balance)
+├── hodl-sequencer  # bin: HTTP intake, block production, OP_RETURN poster
+└── hodl-node       # bin: L1 scanner, sequencer follower, balance query
+```
+
+`hodl-core` is the only library; the three binaries each depend on it. Once `hodl-rpc` DTOs grow beyond ~5 types we'll split them into their own crate; for now they live next to whichever daemon owns them.
+
+## L1 mint UTXO format (P2TR, NUMS internal key, two tapleaves)
+
+Updated to match `issuancev2.tex` §2 + §5.
+
+A hodlcoin mint UTXO is a Taproot output whose internal key is BIP341 NUMS H, with a tap tree containing **exactly two leaves**:
+
+```text
+L_spend = <T> OP_CHECKSEQUENCEVERIFY OP_DROP <user_xonly_pubkey> OP_CHECKSIG
+L_data  = OP_RETURN <D>          where  D = TaggedHash("L2/hodlcoin/v1", user_xonly_pubkey)
+```
+
+- `L_spend` uses **CSV (BIP112)**, not CLTV. `T` is the **relative** locktime in blocks — the committed duration. The leaf is spendable `T` blocks after the funding UTXO confirms; the spend tx must set its input `nSequence` accordingly. Per `issuancev2.tex` §2 "Why CSV rather than CLTV": the minting function takes `T` directly as its argument, so binding `T` itself into the script (rather than an absolute `T_unlock` that requires a chain-state lookup to convert to a duration) is cleaner, and avoids exposing the locker's intended duration to mempool-confirmation latency.
+- `L_data` is permanently unspendable (tapscript inherits Bitcoin's rule that `OP_RETURN` aborts script execution). It exists only as a 32-byte committed payload binding the UTXO to hodlcoin's namespace.
+- `D` being keyed by `user_xonly_pubkey` (not a protocol constant) makes each locker's `L_data` leaf hash a unique-looking random 32-byte value; an outsider with one locker's leaf hash cannot identify others'.
+
+The NUMS internal key is non-negotiable: it's what *forces* the locker to honour the timelock — any spendable internal key would let them dodge the CSV via the key path.
+
+### Lock-duration ceiling (v0 limitation)
+
+BIP112's block-based relative locktime uses the lower 16 bits of `nSequence`, so `T ∈ [1, 65535]` (≈ 1 to 454 days at 10 minute blocks). This is a hard CSV-blocks-mode limit, not a hodlcoin design choice. At the cap with `r = 1/26280` the locker still receives `f_mint(V, 65535, 1/26280) ≈ 0.71 V`, so the cap is well above the useful regime. Multi-year locks would require either the 512-second time form (which has its own 16-bit cap, also ≈ 388 days) or chained CSV locks; both are out of POC scope.
+
+The output scriptPubKey is `OP_1 <Q>` where `Q` is the BIP341 taproot output key:
+
+```text
+Q       = P + t·G,    t = H_TapTweak(P ‖ R)
+R       = TapBranch(sort(h(L_spend), h(L_data)))
+P       = BIP341 NUMS H
+h(L)    = TapLeafHash(L)    // tagged hash with tag "TapLeafHash"
+TapBranch(a, b) = TaggedHash("TapBranch", a‖b)   if a ≤ b else (b‖a)
+```
+
+**Privacy properties** (paper §5.3 verbatim):
+
+- *During the lock period*: full L1 anonymity. The output is an ordinary P2TR; no observer can tell it apart from any other taproot output.
+- *At mint time*: leakage to L2 viewers only. The mint proof reveals `(outpoint, V, T, pk, l2_destination)` to anyone reading L2 blocks; L1 sees nothing.
+- *At unlock time*: residual L1 identifiability. The locker's script-path spend witness reveals a control block containing `h(L_data)`. An observer who computes `TaggedHash("L2/hodlcoin/v1", pk)` (with `pk` taken from the revealed `L_spend`) and rehashes as a candidate leaf can confirm that the UTXO was a hodlcoin mint. We accept this in v0; the paper lays out the decoy-leaves and ZK upgrade paths that close it.
+
+### chain_id
+
+Single string `"hodlcoin"` across all networks. Cross-network UTXO reuse is already impossible (regtest, signet, and mainnet have disjoint chain histories, so an outpoint that exists on one cannot exist on another). The chain_id is hardcoded in `hodl-core::consensus` for v0; it can be promoted to consensus config later if multiple parallel deployments are needed.
+
+### Mint proof wire format
+
+Minimal: the prover sends only what the verifier cannot recompute deterministically.
+
+```rust
+struct OutpointProof {
+    outpoint:          OutPoint,
+    user_xonly_pubkey: XOnlyPublicKey,    // pk
+    lock_blocks:       u32,               // T, the relative locktime baked into L_spend
+    signature:         schnorr::Signature, // BIP340 over the mint sighash
+}
+```
+
+The verifier reconstructs `L_spend`, `L_data`, both leaf hashes, the Merkle root, and the tweaked output key from `(pk, lock_blocks)` and the hardcoded chain_id. If our tree shape ever changes (decoy leaves, alternate data formats), this struct will gain explicit script + path fields per `issuancev2.tex` §2; for v0 the minimal form suffices.
+
+### Verification by the L2
+
+1. Look up `outpoint` on L1 → `(value_sat, scriptPubKey, confirmed_height, confirmations)`.
+2. Check `lock_blocks ∈ [1, 65535]` (BIP112 block-mode range).
+3. Reconstruct `L_spend`, `L_data` from `(pk, lock_blocks)` and chain_id.
+4. Build the 2-leaf tap tree with NUMS-H as internal key, derive `expected_spk = OP_1 <Q_x>`.
+5. Assert `expected_spk == scriptPubKey`. (This is the single check that simultaneously verifies: SPK matches, internal key is NUMS, both leaves are present, both are well-formed, `pk` is the one bound, `T` is the one bound, and chain_id matches hodlcoin.)
+6. Verify the Schnorr signature over `sha256("hodl-mint-v0" || outpoint || l2_destination)` under `pk`.
+7. Require `confirmations >= MINT_CONFIRMATIONS` (= 1 in v0).
+8. Compute `amount = mint_fn(value_sat, lock_blocks, r)`. No `T_create` arithmetic needed — `T = lock_blocks` is what the script committed to.
+9. Check `proof.nullifier() (= serialised outpoint)` is not in the consumed set.
+
+## Mint function
+
+```text
+f_mint(V, T) = V * (1 - (1 + rT) * e^{-rT})
+```
+
+- `V` in satoshis; `f_mint` in L2 atoms; `ATOMS_PER_SAT = 1` for v0 so the bound `f_mint <= V` is trivially preserved.
+- Initial `r = 1 / 26_280` per L1 block → inflection at T ≈ 6 months of blocks.
+- `r` is **consensus state**, not a config knob: it lives in `LedgerState::current_r`, is committed to by `state_root`, and shifts at retarget windows (see "Retargeting").
+
+## Retargeting
+
+Consensus constants (`hodl-core::consensus`):
+
+```text
+TARGET_ATOMS_PER_BLOCK = 50_000_000    // 0.5 BTC-equivalent of L2 issuance per L1 block
+RETARGET_WINDOW_BLOCKS = 144           // ~1 day at 10 min/block (POC; paper recommends months)
+RETARGET_MAX_FACTOR    = 4.0           // r_new ∈ [r_old / 4, r_old × 4]
+INITIAL_R              = 1 / 26_280    // 6mo inflection
+```
+
+State (`LedgerState`):
+
+```text
+current_r:                    f64    // active r; used by both producer and node verifier
+current_window_atoms:         u64    // atoms minted in the open window so far
+current_window_start_height:  u32    // first L2 block height of the open window
+```
+
+Algorithm (`LedgerState::end_of_block(height)`, called after applying every block):
+
+```text
+if height == 0 || height % W != 0 { return; }   // skip genesis and non-boundaries
+
+let target = TARGET_ATOMS_PER_BLOCK * W
+let ratio  = clamp(current_window_atoms / target,  1/MAX_FACTOR,  MAX_FACTOR)
+current_r /= ratio                             // overshoot ⇒ ratio > 1 ⇒ r shrinks
+current_window_atoms = 0
+current_window_start_height = height + 1
+```
+
+Direction: `f_mint` is monotone increasing in `r` (derivative is `V · r · T² · e^{-rT} > 0`), so dividing `r` by `ratio > 1` slows future issuance. Same sign convention as Bitcoin's `new_difficulty = old_difficulty / clamped_ratio`.
+
+### Producer / node lock-step
+
+The producer snapshots `state.current_r` at block start, re-runs every `MintEntry`'s witness with that `r`, and stamps the freshly-derived credit's `event` into the block. The node, replaying with the same starting state, uses the same `r` value when calling `verify_mint_entry`, so the witness-derived credit on the node side matches what the producer put in the block. `end_of_block` then runs on both sides, shifting `r` for the next block in lock-step.
+
+A user who submitted a mint at a different `r` (e.g., a window straddled their submission and the producer's inclusion) gets the new `r`'s amount when they actually mint — submit-time `mint_amount` in `/mint` responses is best-effort.
+
+## L2 block structure
+
+One L2 block per L1 block. Cadence is locked by the sequencer posting one OP_RETURN per L1 block.
+
+```text
+L2BlockHeader {
+    height:        u32,
+    prev_hash:     H256,
+    l1_block_hash: H256,
+    l1_height:     u32,
+    txs_root:      H256,
+    state_root:    H256,
+    timestamp:     u64,
+}
+L2Block { header, txs: Vec<L2Tx> }
+```
+
+`L2Tx` is either:
+
+- `Mint(MintEntry { event, witness })` — both the declared outcome (amount, nullifier, destination, lock parameters, L1 value) AND the proof. Nodes re-run `verify_mint_entry(entry, &secp, &l1, r)` for every mint in every block; a mismatch between what the witness authorises and what the event declares fails block validation. Block validity is therefore independent of trusting the sequencer.
+- `Transfer(SignedTransfer)` — `(from, to, amount, nonce, schnorr_sig)`. Sighash: `sha256("hodl-transfer-v0" || json(body))`.
+
+State is a pair of maps: `accounts: BTreeMap<L2Address, Account>` and `consumed_nullifiers: BTreeSet<String>`. State root is `sha256("hodl-state-v0" || serialized(accounts) || "|nullifiers|" || serialized(nullifiers))`. A real Merkle tree (so light clients can produce inclusion proofs) can be retrofitted later without changing the on-chain commitment.
+
+## L1 attestation chain
+
+Each L2 block is committed on L1 by a transaction whose vout=0 is the
+73-byte attestation OP_RETURN and whose vout=1 is a change output that
+becomes the next chain anchor. Attestations form an explicit on-chain
+linked list rooted at `anchor_0`, which the sequencer creates at
+cold-start and embeds in the L2 genesis block header.
+
+### Attestation payload (73 bytes, vout=0)
+
+```text
+magic(4) = "HODL"
+version(1) = 0
+height(4 BE)
+l2_block_hash(32) = sha256("hodl-block-v0" || canonical(header))
+state_root(32)
+```
+
+Fits comfortably under the 80-byte standard OP_RETURN limit.
+
+### Attestation transaction shape
+
+```text
+vin[0]  = anchor_{n-1}                              // previous chain link
+vout[0] = OP_RETURN <73-byte attestation_n payload>
+vout[1] = value(anchor_{n-1}) − fee → wallet addr    // == anchor_n
+locktime = 0
+```
+
+Sequencer builds it via bitcoind's `send` RPC with
+`options.inputs=[anchor_{n-1}]`, `add_inputs=false`,
+`change_position=1`. bitcoind funds, signs, broadcasts atomically.
+
+### Chain root
+
+On cold start, the sequencer:
+
+1. Calls `listunspent` and picks its largest UTXO as `anchor_0`.
+2. Records `anchor_0`'s outpoint into the L2 genesis header
+   (`L2BlockHeader.anchor_outpoint: Option<OutPoint>`, populated only
+   at height 0).
+3. Persists `anchor_0` as the active chain anchor in its store.
+
+Nodes cold-start by fetching the L2 genesis block from the sequencer's
+`GET /block/0` endpoint, reading `anchor_outpoint` out of its header,
+and persisting it as their own chain anchor.
+
+### Sequencer authentication
+
+Implicit, by chain inheritance. A node only follows the unique tx that
+spends its currently-tracked anchor. An impostor who broadcasts a HODL
+OP_RETURN with unrelated inputs is invisible; an impostor who tries to
+spend the anchor with a different tx loses to whichever spend bitcoind
+mines first. No `SEQUENCER_PK` is needed — the protocol is identified
+by the (genesis-embedded) `anchor_0` outpoint and "chain inherited
+from it" semantics.
+
+### Equivocation
+
+Each anchor is a single UTXO on L1, and a UTXO can be spent at most
+once. The sequencer therefore cannot publish two competing attestations
+at the same L2 height; whichever spend bitcoind mines wins, and the
+other is invalidated by the L1 mempool / consensus.
+
+### Failure modes (v0)
+
+- **L1 reorg of the chain anchor**: every attestation downstream goes
+  with it. Same blast radius as the existing "1-confirmation" stance;
+  not a new exposure.
+- **RBF / fee-bumping the attestation tx**: would temporarily fork the
+  chain in mempool until one wins. The sequencer does not RBF in v0.
+- **Dust**: the anchor UTXO shrinks by `fee` per attestation. With a
+  1 BTC seed at the regtest fallback rate (~1000 sat/vB), this lasts
+  ~500 attestations; at signet rates (~1 sat/vB), ~3500 days of
+  attestations. Production deployment would need an operator top-up
+  mechanism (out of POC scope).
+
+## Mint witness pluggability
+
+The mint pipeline is structured around two abstractions:
+
+```rust
+trait MintProof {
+    fn nullifier(&self) -> Vec<u8>;
+    fn verify<C>(
+        &self, secp: &Secp256k1<C>, l1: &dyn L1View,
+        l2_destination: L2Address, r: f64,
+    ) -> Result<MintCredit, MintError>;
+}
+
+enum MintProofEnvelope {
+    V0Outpoint(OutpointProof),
+    // V1Ring(RingProof) — later
+    // V2Zk(ZkProof)    — later still
+}
+```
+
+Variants:
+
+- **v0** `OutpointProof` — nullifier = serialised L1 outpoint, witness = (user_pubkey, lock_blocks, schnorr_sig over (outpoint, l2_dest)).
+- **v1 (later)** `RingProof` — nullifier = LSAG key image, witness = (ring_sig over equal-denom CSV UTXOs, key_image).
+- **v2 (later)** `ZkProof` — a succinct proof of the §5.4 statement; nullifier is one of the proof's public outputs.
+
+The envelope is committed into the L2 block as `MintEntry { event, witness }`. Adding a future variant means:
+
+- Adding the enum variant + implementing `MintProof` for it.
+- The sequencer's `submit_mint` already speaks `MintProofEnvelope`, so a new variant slots in without touching that handler.
+- The node's follower already calls `verify_mint_entry`, which delegates to the envelope's `MintProof::verify`, so a new variant slots in there too.
+- Block format is unchanged: `MintEntry` is generic over the envelope variant.
+- The consumed set is keyed on opaque `Vec<u8>` nullifiers, not on `OutPoint`, so the v1 ring-image variant fits without schema change.
+
+What v1 will additionally need (deferred): fixed allowed `(V, T)` denominations (to maximise ring size), an `aut-ct` integration, and a small change to the wallet to produce ring signatures.
+
+## Trust model
+
+- The sequencer is **trusted not to censor** in v0. **Equivocation is structurally prevented** by the L1 attestation chain: each anchor UTXO can be spent only once.
+- Bitcoin's L1 trust model is unchanged: CSV locks behave per consensus, L1 finality is L1 finality.
+- L2 nodes do *not* trust the sequencer about mint validity. Each `L2Tx::Mint(MintEntry)` in every block carries its own witness; the node re-runs `verify_mint_entry` against L1 and rejects the block if the witness-derived credit disagrees with the declared event in any field.
+
+## What we deliberately did not build
+
+- No fee market on L2.
+- No reorg handling (1 confirmation; on regtest/signet reorgs are vanishingly rare for a demo).
+- No P2P among nodes — everyone follows the sequencer's HTTP endpoint directly.
+- No fraud proofs, no DA layer beyond "the sequencer serves bodies".
+- No pegging of any kind.
+
+Each of these is a known follow-up; none is required to demonstrate the issuance primitive end-to-end.
+
+## Open POC tasks (informational)
+
+After the foundation lands (this design + `hodl-core`):
+
+1. **hodl-wallet** — keygen, build P2TR CLTV mint UTXOs via bitcoind RPC, generate mint messages, submit transfers, query balance.
+2. **hodl-sequencer** — HTTP intake (`POST /mint`, `POST /transfer`, `GET /block/:height`, `GET /head`), per-L1-block tick, OP_RETURN poster (uses its own bitcoind L1 wallet for fee inputs).
+3. **hodl-node** — L1 scanner, sequencer follower, replay + state, balance/query HTTP.
+4. **End-to-end demo script** — spin up regtest, mine some BTC, run the wallet through a mint + transfer.

@@ -1,0 +1,15 @@
+target/
+Cargo.lock.bak
+*.swp
+*.swo
+.DS_Store
+.env
+.env.local
+data/
+
+# Local IDE state — not protocol-relevant.
+.claude/
+
+# Demo scratch dir created by scripts/regtest-demo.sh — only here as a
+# safety net if you ever move it inside the repo.
+/tmp/hodl-regtest/
