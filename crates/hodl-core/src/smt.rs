@@ -20,10 +20,12 @@
 
 use crate::hash::H256;
 use crate::state::Account;
+use alloc::boxed::Box;
+use alloc::vec::Vec;
 use bitcoin::secp256k1::XOnlyPublicKey;
+use once_cell::race::OnceBox;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::sync::OnceLock;
 
 pub const TREE_DEPTH: usize = 256;
 
@@ -31,7 +33,7 @@ pub const TREE_DEPTH: usize = 256;
 /// height `d`. empty[0] = empty leaf, empty[256] = root of an entirely
 /// empty SMT.
 fn empty_subtree_hashes() -> &'static [H256; TREE_DEPTH + 1] {
-    static CACHE: OnceLock<[H256; TREE_DEPTH + 1]> = OnceLock::new();
+    static CACHE: OnceBox<[H256; TREE_DEPTH + 1]> = OnceBox::new();
     CACHE.get_or_init(|| {
         let mut h = [H256::ZERO; TREE_DEPTH + 1];
         h[0] = {
@@ -42,7 +44,7 @@ fn empty_subtree_hashes() -> &'static [H256; TREE_DEPTH + 1] {
         for d in 0..TREE_DEPTH {
             h[d + 1] = branch_hash(h[d], h[d]);
         }
-        h
+        Box::new(h)
     })
 }
 
@@ -85,7 +87,12 @@ fn bit_at(addr: &XOnlyPublicKey, depth: usize) -> u8 {
 /// terminal slot is a populated `(balance, nonce)` or "no such
 /// account". Both are equally valid Merkle leaves; the difference is
 /// only what they prove about the live state.
+/// Tells the verifier whether the leaf preimage at the proof's terminal
+/// slot is a populated `(balance, nonce)` or "no such account". Both
+/// are equally valid Merkle leaves; only the meaning to the application
+/// differs.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "std", derive(utoipa::ToSchema))]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum LeafKind {
     /// An account exists at this address.
@@ -104,11 +111,19 @@ impl LeafKind {
 }
 
 /// An inclusion proof (or non-inclusion proof if `leaf == Empty`).
+/// Verifies against an `accounts_root` SMT hash.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "std", derive(utoipa::ToSchema))]
 pub struct InclusionProof {
+    /// L2 address (BIP340 x-only public key) the proof is for.
+    /// Hex-encoded, 32 bytes.
+    #[cfg_attr(
+        feature = "std",
+        schema(value_type = String, example = "0000000000000000000000000000000000000000000000000000000000000001")
+    )]
     pub address: XOnlyPublicKey,
     pub leaf: LeafKind,
-    /// Sibling hashes, leaf-to-root order; always length `TREE_DEPTH`.
+    /// Sibling hashes, leaf-to-root order; always length 256.
     pub siblings: Vec<H256>,
 }
 

@@ -15,13 +15,16 @@ use crate::consensus::{
 use crate::hash::H256;
 use crate::smt;
 use crate::tx::{Amount, L2Address, L2Tx, MintEntry, SignedTransfer};
+use alloc::collections::{BTreeMap, BTreeSet};
+use alloc::string::String;
+use alloc::vec::Vec;
 use bitcoin::secp256k1::{Message, Secp256k1, Verification};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "std", derive(utoipa::ToSchema))]
 pub struct Account {
     pub balance: Amount,
     pub nonce: u64,
@@ -222,6 +225,7 @@ impl LedgerState {
 /// scalars) recompute the `state_root` and compare against the value
 /// it pulled off L1.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "std", derive(utoipa::ToSchema))]
 pub struct StateComponents {
     pub accounts_root: H256,
     pub nullifiers_hash: H256,

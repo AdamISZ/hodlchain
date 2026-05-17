@@ -5,6 +5,14 @@ members = [
     "crates/hodl-wallet",
     "crates/hodl-sequencer",
     "crates/hodl-node",
+    "crates/hodl-zk-host",
+]
+
+# hodl-zk-program is built for a RISC-V zkVM target via `cargo prove
+# build`, not for the host. Excluded so the parent workspace doesn't
+# try to compile it.
+exclude = [
+    "crates/hodl-zk-program",
 ]
 
 [workspace.package]
@@ -16,10 +24,11 @@ publish = false
 [workspace.dependencies]
 hodl-core = { path = "crates/hodl-core" }
 
-# Bitcoin
-bitcoin = { version = "0.32", features = ["serde", "rand-std"] }
+# Bitcoin. `default-features = false` so hodl-core can opt out of std
+# for the SP1 zk-program build; daemons re-enable via the std feature.
+bitcoin = { version = "0.32", default-features = false, features = ["serde"] }
 bitcoincore-rpc = "0.19"
-secp256k1 = { version = "0.29", features = ["serde", "rand-std", "global-context"] }
+secp256k1 = { version = "0.29", default-features = false, features = ["serde", "alloc"] }
 
 # Async / HTTP
 tokio = { version = "1", features = ["full"] }
@@ -27,17 +36,25 @@ axum = "0.7"
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
 
 # Serde / encoding
-serde = { version = "1", features = ["derive"] }
+serde = { version = "1", default-features = false, features = ["derive"] }
 serde_json = "1"
-hex = "0.4"
+hex = { version = "0.4", default-features = false, features = ["alloc"] }
 
 # Hashing
-sha2 = "0.10"
+sha2 = { version = "0.10", default-features = false }
 
 # CLI / config
 clap = { version = "4", features = ["derive", "env"] }
 anyhow = "1"
-thiserror = "1"
+# v2: no_std-capable when default-features is disabled. We use it
+# from `hodl-core` which (after the no_std refactor) must compile
+# for the SP1 RISC-V zkVM target.
+thiserror = { version = "2", default-features = false }
+# Lock-once cache types that work in both std and no_std.
+once_cell = { version = "1", default-features = false, features = ["alloc"] }
+# Math functions (exp, floor, …) for f64 in no_std builds. Used by
+# hodl-core's mint_fn. std builds use it too — keeps one code path.
+libm = { version = "0.2", default-features = false }
 
 # Storage
 rusqlite = { version = "0.32", features = ["bundled"] }
@@ -45,6 +62,10 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 # Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# OpenAPI / Swagger UI
+utoipa = { version = "5", features = ["axum_extras"] }
+utoipa-swagger-ui = { version = "8", features = ["axum"] }
 
 [profile.release]
 opt-level = 3

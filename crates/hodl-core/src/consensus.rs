@@ -96,11 +96,11 @@ pub fn mint_fn(value_sat: u64, lock_blocks: u32, r: f64) -> u64 {
         return 0;
     }
     let rt = r * (lock_blocks as f64);
-    let ratio = 1.0 - (1.0 + rt) * (-rt).exp();
+    let ratio = 1.0 - (1.0 + rt) * libm::exp(-rt);
     // Clamp into [0, 1) defensively.
     let ratio = ratio.clamp(0.0, 1.0 - f64::EPSILON);
     let atoms = (value_sat as f64) * ratio * (ATOMS_PER_SAT as f64);
-    atoms.floor() as u64
+    libm::floor(atoms) as u64
 }
 
 #[cfg(test)]

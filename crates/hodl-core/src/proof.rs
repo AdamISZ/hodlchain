@@ -16,6 +16,7 @@
 use crate::consensus::{mint_fn, ATOMS_PER_SAT, DEFAULT_R, MAX_LOCK_BLOCKS, MINT_CONFIRMATIONS};
 use crate::l1::expected_p2tr_spk;
 use crate::tx::{L2Address, MintEntry, MintEvent};
+use alloc::vec::Vec;
 use bitcoin::secp256k1::{schnorr, Message, Secp256k1, Verification, XOnlyPublicKey};
 use bitcoin::{OutPoint, ScriptBuf};
 use serde::{Deserialize, Serialize};
@@ -30,6 +31,7 @@ use thiserror::Error;
 /// and implementing its `MintProof` impl; block format and consumed-set
 /// schema are unchanged.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "std", derive(utoipa::ToSchema))]
 #[serde(tag = "variant", rename_all = "snake_case")]
 pub enum MintProofEnvelope {
     V0Outpoint(OutpointProof),
@@ -130,10 +132,21 @@ pub trait MintProof {
 /// NUMS-H output key from `(user_xonly_pubkey, lock_blocks)` alone, and
 /// compares the resulting scriptPubKey to the on-chain SPK of `outpoint`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "std", derive(utoipa::ToSchema))]
 pub struct OutpointProof {
+    /// L1 outpoint funding this mint. Serialised as `{txid, vout}`.
+    #[cfg_attr(feature = "std", schema(value_type = crate::schemas::OutPointWire))]
     pub outpoint: OutPoint,
+    /// Locker's BIP340 x-only public key (hex-encoded).
+    #[cfg_attr(
+        feature = "std",
+        schema(value_type = String, example = "0000000000000000000000000000000000000000000000000000000000000001")
+    )]
     pub user_xonly_pubkey: XOnlyPublicKey,
+    /// Relative locktime T baked into L_spend's CSV.
     pub lock_blocks: u32,
+    /// Schnorr signature over `sha256("hodl-mint-v0" || outpoint || l2_destination)`. Hex.
+    #[cfg_attr(feature = "std", schema(value_type = String))]
     pub signature: schnorr::Signature,
 }
 

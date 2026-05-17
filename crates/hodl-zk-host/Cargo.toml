@@ -1,0 +1,15 @@
+[package]
+name = "hodl-zk-host"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "hodl-zk-smoke"
+path = "src/main.rs"
+
+[dependencies]
+sp1-sdk = "6"
+anyhow = { workspace = true }
+tokio = { workspace = true }

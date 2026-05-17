@@ -1,0 +1,176 @@
+# hodlcoin
+
+A proof-of-concept Layer 2 anchored to Bitcoin, exploring a fair-launch
+issuance primitive: users provably commit Bitcoin via a relative
+timelock (`OP_CHECKSEQUENCEVERIFY`) on a taproot output for a chosen
+duration, and the L2 mints new tokens in return — bounded by the value
+locked and superlinear in lock duration, saturating at the locked value
+as the duration approaches infinity. The BTC is recoverable; nothing
+is destroyed.
+
+> **Status**: research POC. Single-sequencer L2 on Bitcoin regtest /
+> signet. Not for mainnet, not audited, not stable. The protocol design
+> is the deliverable; everything in this repo runs but is shaped to
+> teach, not to ship.
+
+The conceptual spec lives in `docs/issuancev3.tex` (the working paper);
+the implementation notes are in `docs/design.md`.
+
+## What's in here
+
+| Crate                  | What it is                                                       |
+|------------------------|------------------------------------------------------------------|
+| `crates/hodl-core`     | Library: consensus types, mint function, retargeting, SMT,       |
+|                        | block + tx + proof types, OP_RETURN attestation codec,           |
+|                        | Esplora wire types, shared RPC DTOs.                             |
+| `crates/hodl-sequencer`| Single-sequencer L2 producer. Builds one L2 block per L1 block,  |
+|                        | posts a chained OP_RETURN attestation per block, serves an HTTP  |
+|                        | API for tx submission and queries.                               |
+| `crates/hodl-node`     | Passive L2 validator. Follows the L1 attestation chain via       |
+|                        | bitcoind, replays L2 blocks, re-verifies every mint witness      |
+|                        | against L1. Exposes a slim Esplora-compatible HTTP subset so     |
+|                        | light wallets can walk the chain without their own bitcoind.    |
+| `crates/hodl-wallet`   | CLI wallet. Creates CSV-locked taproot mint UTXOs, submits mint  |
+|                        | messages + transfers, verifies its own balance via SMT inclusion |
+|                        | proofs, supports a light-client mode that derives state from L1  |
+|                        | via Esplora.                                                     |
+| `docs/`                | `design.md` is the implementation companion to the paper.        |
+|                        | `issuancev*.tex` are the working paper drafts (untracked).       |
+| `scripts/regtest-demo.sh` | End-to-end demo against a temp bitcoind on regtest.           |
+
+## Build
+
+```bash
+cargo build --workspace
+cargo test --workspace
+```
+
+You need a recent Rust (edition 2021+). All daemons use tokio + axum.
+No proof-system dependencies yet — ZK validity proofs are the next big
+work item.
+
+## See it run
+
+The full end-to-end flow against a fresh regtest bitcoind:
+
+```bash
+./scripts/regtest-demo.sh
+```
+
+What it does (~15 seconds):
+
+1. Spins up `bitcoind` in `/tmp/hodl-regtest`, creates a sequencer-funding
+   wallet and a user wallet, mines 102 blocks.
+2. Starts `hodl-sequencer` (port 28080) and `hodl-node` (port 28081).
+3. Runs two `hodl-wallet`s (Alice + Bob) through:
+   - Alice creates a CSV-locked taproot mint UTXO (P2TR, NUMS internal
+     key, two-leaf tap tree per the paper, 0.1 BTC, T = 10000 blocks).
+   - Submits a mint message; sequencer verifies the witness against L1,
+     credits Alice ≈ 564,057 L2 atoms.
+   - Alice transfers 141,014 atoms to Bob; both balances settle.
+4. Verifies Alice's balance three ways:
+   - **`balance`** — trusts the response.
+   - **`verify-balance`** — re-derives `state_root` from the response's
+     state-components, verifies the SMT inclusion proof, checks the
+     leaf matches the reported balance/nonce.
+   - **`light-balance`** — walks the L1 attestation chain via the
+     node's Esplora-compatible endpoints to derive `state_root`
+     independently, then verifies the inclusion proof against *that*
+     root. End-to-end light-client verification with no bitcoind RPC
+     from the wallet.
+
+To leave the daemons running so you can browse the API docs:
+
+```bash
+./scripts/regtest-demo.sh --keep-running
+```
+
+Then while it's paused at "press enter to tear down":
+
+- Sequencer Swagger UI: <http://127.0.0.1:28080/docs/>
+- Node Swagger UI: <http://127.0.0.1:28081/docs/>
+- Raw OpenAPI: `/openapi.json` on either daemon.
+
+Press enter when done; the script tears bitcoind and the daemons down.
+
+### Bitcoin Core path
+
+The demo defaults to `~/code/bitcoin-28.0/bin/` for the `bitcoind` and
+`bitcoin-cli` binaries. If yours is elsewhere, set:
+
+```bash
+BITCOIND_PREFIX=/path/to/dir ./scripts/regtest-demo.sh
+```
+
+or supply both binaries explicitly via `BITCOIND_BIN` and
+`BITCOIN_CLI_BIN`. Any Bitcoin Core >= v22 should work.
+
+## Reading the code
+
+If you want to follow the protocol from the bottom up:
+
+1. **`crates/hodl-core/src/consensus.rs`** — `mint_fn`, retargeting
+   constants, BIP341 NUMS H, chain_id tag.
+2. **`crates/hodl-core/src/l1.rs`** — the canonical mint-UTXO Taproot
+   construction (NUMS internal key + 2-leaf tap tree: CSV spend leaf
+   and `OP_RETURN <D>` namespace-binding data leaf).
+3. **`crates/hodl-core/src/proof.rs`** — `MintProof` trait, `MintProofEnvelope` enum (v0 = transparent outpoint proof; future
+   variants slot in here), `verify_mint_entry` glue.
+4. **`crates/hodl-core/src/state.rs`** — `LedgerState`, retargeting,
+   `state_root` computation via `StateComponents`.
+5. **`crates/hodl-core/src/smt.rs`** — 256-level sparse Merkle tree
+   over accounts, inclusion/non-inclusion proofs.
+6. **`crates/hodl-core/src/op_return.rs`** — 73-byte attestation codec.
+7. **`crates/hodl-sequencer/src/{producer,bitcoind,api}.rs`** — block
+   production, chained attestation tx construction, HTTP intake.
+8. **`crates/hodl-node/src/{follower,bitcoind,api}.rs`** — L1 chain
+   walk, block replay, Esplora endpoints.
+9. **`crates/hodl-wallet/src/{main,esplora}.rs`** — CLI surface and
+   light-client chain walker.
+
+Or read `docs/design.md` front-to-back for the design rationale.
+
+## Trust posture (today)
+
+What state-light clients verify cryptographically:
+
+- The L1 chain of OP_RETURN attestations from a known `anchor_0`
+  outpoint (via any Esplora — mempool.space, electrs, or our own
+  hodl-node serving the same wire shape).
+- The SMT inclusion proof of their own account against the
+  `state_root` derived from L1.
+
+What's still trusted (deferred to later work):
+
+- That the published `state_root` is the *correct* output of valid
+  L2 state transitions (i.e. that signatures verified, balances were
+  spent correctly, retargeting was computed correctly). Today this
+  relies on the honest-majority assumption among `hodl-node`-class
+  full validators. Closed by a ZK validity proof.
+- That mint witnesses themselves actually authorise the L2 token
+  issuance. Full nodes verify this against L1; light clients trust
+  them. Closed by an anonymous mint variant (aut-ct ring proofs) or
+  by an extended ZK proof that includes Bitcoin SPV.
+- Block-body availability — currently served by the sequencer's HTTP.
+- Sequencer liveness — single sequencer; no rotation, no fallback.
+
+## Roadmap (rough)
+
+Working through:
+
+1. **README + housekeeping** ✓ (this file).
+2. **ZK validity proof for transfer state transitions** (in progress).
+   Transfers + retargeting + SMT updates verified by a SP1-generated
+   proof; light clients fetch and verify it. Mints continue to be
+   verified by full nodes only (separate future work). See design.md
+   for the trust-model implications.
+3. **End-to-end desktop client** (next). A polished `egui` app
+   bundling the L1 mint flow and the L2 state-light-validating
+   wallet — the demo target for non-developer users.
+
+Beyond that: anonymity v1 via aut-ct ring proofs for mints,
+decentralised DA for block bodies, multi-sequencer.
+
+## License
+
+Not yet specified. To be determined before any wider release.

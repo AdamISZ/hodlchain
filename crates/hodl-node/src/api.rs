@@ -17,6 +17,8 @@ use hodl_core::tx::L2Address;
 use serde::Serialize;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
+use utoipa::{OpenApi, ToSchema};
+use utoipa_swagger_ui::SwaggerUi;
 
 use crate::bitcoind::NodeL1;
 use crate::shared::Shared;
@@ -39,7 +41,53 @@ pub fn router(state: AppState) -> Router {
         .route("/tx/:txid", get(esplora_get_tx))
         .route("/tx/:txid/outspend/:vout", get(esplora_outspend))
         .with_state(state)
+        .merge(SwaggerUi::new("/docs").url("/openapi.json", ApiDoc::openapi()))
 }
+
+/// OpenAPI spec aggregator for the node's HTTP surface.
+/// Served as JSON at `/openapi.json`, rendered as Swagger UI at `/docs`.
+#[derive(OpenApi)]
+#[openapi(
+    info(
+        title = "hodl-node HTTP API",
+        description = "Passive L2 validator + Esplora-compatible L1 lookups.\n\n\
+                       Replays L2 blocks from a sequencer's body endpoint, \
+                       re-verifies every mint witness against L1, exposes \
+                       light-client query endpoints (balance with inclusion \
+                       proof) and Esplora-shape `tx` / `outspend` endpoints \
+                       so light wallets can walk the attestation chain \
+                       without bitcoind.",
+        version = "0.1.0",
+    ),
+    paths(
+        get_head, get_balance, get_block,
+        esplora_get_tx, esplora_outspend,
+    ),
+    components(schemas(
+        hodl_core::rpc::HeadResponse,
+        hodl_core::rpc::BalanceResponse,
+        hodl_core::proof::MintProofEnvelope,
+        hodl_core::proof::OutpointProof,
+        hodl_core::tx::SignedTransfer,
+        hodl_core::tx::TransferBody,
+        hodl_core::tx::MintEntry,
+        hodl_core::tx::MintEvent,
+        hodl_core::tx::L2Tx,
+        hodl_core::block::L2Block,
+        hodl_core::block::L2BlockHeader,
+        hodl_core::state::StateComponents,
+        hodl_core::state::Account,
+        hodl_core::smt::InclusionProof,
+        hodl_core::smt::LeafKind,
+        hodl_core::hash::H256,
+        hodl_core::schemas::OutPointWire,
+        EsploraTx,
+        EsploraVin,
+        EsploraVout,
+        EsploraOutspend,
+    ))
+)]
+pub struct ApiDoc;
 
 struct ApiError(anyhow::Error);
 
@@ -53,6 +101,13 @@ impl IntoResponse for ApiError {
     }
 }
 
+#[utoipa::path(
+    get,
+    path = "/head",
+    responses(
+        (status = 200, description = "Current L2 head as observed by this node", body = HeadResponse),
+    ),
+)]
 async fn get_head(State(app): State<AppState>) -> Json<HeadResponse> {
     let head = app.shared.head.lock().unwrap().clone();
     Json(HeadResponse {
@@ -63,6 +118,17 @@ async fn get_head(State(app): State<AppState>) -> Json<HeadResponse> {
     })
 }
 
+#[utoipa::path(
+    get,
+    path = "/balance/{addr}",
+    params(
+        ("addr" = String, Path, description = "L2 address (BIP340 x-only pubkey, 64-char hex)"),
+    ),
+    responses(
+        (status = 200, description = "Balance + SMT inclusion proof", body = BalanceResponse),
+        (status = 500, description = "Invalid address hex"),
+    ),
+)]
 async fn get_balance(
     State(app): State<AppState>,
     Path(addr_hex): Path<String>,
@@ -86,6 +152,17 @@ async fn get_balance(
     }))
 }
 
+#[utoipa::path(
+    get,
+    path = "/block/{height}",
+    params(
+        ("height" = u32, Path, description = "L2 block height (0 = genesis)"),
+    ),
+    responses(
+        (status = 200, description = "Full L2 block body (header + txs)", body = hodl_core::block::L2Block),
+        (status = 404, description = "No block at that height"),
+    ),
+)]
 async fn get_block(
     State(app): State<AppState>,
     Path(height): Path<u32>,
@@ -111,37 +188,57 @@ fn parse_xonly(s: &str) -> anyhow::Result<XOnlyPublicKey> {
 // light client at a real Esplora endpoint (e.g. mempool.space) works
 // identically — the wallet just ignores the extra fields.
 
-#[derive(Serialize)]
-struct EsploraTx {
-    txid: String,
-    vin: Vec<EsploraVin>,
-    vout: Vec<EsploraVout>,
+/// Slim Esplora-shape transaction. Real Esplora returns more fields
+/// (block status, fee, sizes); we omit them — the wallet doesn't read
+/// them, and a wallet pointed at a real Esplora ignores the extras.
+#[derive(Serialize, ToSchema)]
+pub struct EsploraTx {
+    /// Transaction id (32-byte hex).
+    pub txid: String,
+    pub vin: Vec<EsploraVin>,
+    pub vout: Vec<EsploraVout>,
 }
 
-#[derive(Serialize)]
-struct EsploraVin {
-    txid: String,
-    vout: u32,
+#[derive(Serialize, ToSchema)]
+pub struct EsploraVin {
+    /// The spent outpoint's tx id.
+    pub txid: String,
+    /// The spent outpoint's vout.
+    pub vout: u32,
 }
 
-#[derive(Serialize)]
-struct EsploraVout {
+#[derive(Serialize, ToSchema)]
+pub struct EsploraVout {
     /// scriptPubKey, hex-encoded.
-    scriptpubkey: String,
+    pub scriptpubkey: String,
     /// Output value in satoshis.
-    value: u64,
+    pub value: u64,
 }
 
-#[derive(Serialize)]
-struct EsploraOutspend {
-    spent: bool,
+/// Esplora-shape outspend response.
+#[derive(Serialize, ToSchema)]
+pub struct EsploraOutspend {
+    pub spent: bool,
+    /// When `spent`, the spending tx's txid (32-byte hex).
     #[serde(skip_serializing_if = "Option::is_none")]
-    txid: Option<String>,
+    pub txid: Option<String>,
     /// L1 block height at which the spending tx was mined.
     #[serde(skip_serializing_if = "Option::is_none")]
-    block_height: Option<u32>,
+    pub block_height: Option<u32>,
 }
 
+#[utoipa::path(
+    get,
+    path = "/tx/{txid}",
+    params(
+        ("txid" = String, Path, description = "Transaction id (32-byte hex)"),
+    ),
+    responses(
+        (status = 200, description = "Esplora-shape (slim) transaction info", body = EsploraTx),
+        (status = 404, description = "tx not found in bitcoind (txindex required)"),
+    ),
+    tag = "Esplora",
+)]
 async fn esplora_get_tx(
     State(app): State<AppState>,
     Path(txid_hex): Path<String>,
@@ -178,6 +275,18 @@ async fn esplora_get_tx(
     Ok(Json(body).into_response())
 }
 
+#[utoipa::path(
+    get,
+    path = "/tx/{txid}/outspend/{vout}",
+    params(
+        ("txid" = String, Path, description = "Transaction id of the spent output's parent (32-byte hex)"),
+        ("vout" = u32, Path, description = "Output index within the parent tx"),
+    ),
+    responses(
+        (status = 200, description = "Whether the outpoint is spent and, if so, by which tx", body = EsploraOutspend),
+    ),
+    tag = "Esplora",
+)]
 async fn esplora_outspend(
     State(app): State<AppState>,
     Path((txid_hex, vout)): Path<(String, u32)>,

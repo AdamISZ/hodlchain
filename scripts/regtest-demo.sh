@@ -12,9 +12,28 @@
 #
 # Cleans up bitcoind and both daemons on EXIT.
 #
+# Flags:
+#   --keep-running   After the demo finishes, leave bitcoind +
+#                    sequencer + node alive and pause waiting for
+#                    the user to press enter. Useful for poking at
+#                    http://127.0.0.1:28080/docs/ (Swagger UI).
+#
 # Requirements on $PATH: bitcoind, bitcoin-cli, curl, jq.
 
 set -euo pipefail
+
+KEEP_RUNNING=0
+for arg in "$@"; do
+    case "$arg" in
+        --keep-running) KEEP_RUNNING=1 ;;
+        -h|--help)
+            sed -n '2,16p' "$0"
+            exit 0
+            ;;
+        *)
+            echo "unknown arg: $arg" >&2; exit 1 ;;
+    esac
+done
 
 # --- Layout ----------------------------------------------------------------
 
@@ -334,7 +353,27 @@ say "light-client head (derive state_root from L1 attestation chain via Esplora)
 say "light-client balance for alice (L1-walk + proof verify, end-to-end)"
 "$WALLET_BIN" --wallet "$ALICE_WALLET" light-balance | sed 's/^/    /'
 
+say "OpenAPI specs"
+echo -n "    sequencer /openapi.json: "
+curl -sf "http://127.0.0.1:$SEQ_PORT/openapi.json" \
+    | jq -c '{title: .info.title, paths: (.paths | keys), schemas: (.components.schemas | keys | length)}'
+echo -n "    node      /openapi.json: "
+curl -sf "http://127.0.0.1:$NODE_PORT/openapi.json" \
+    | jq -c '{title: .info.title, paths: (.paths | keys), schemas: (.components.schemas | keys | length)}'
+
+dim "    Swagger UI available while daemons run:"
+dim "        sequencer: http://127.0.0.1:$SEQ_PORT/docs/"
+dim "        node:      http://127.0.0.1:$NODE_PORT/docs/"
+
 ok "demo complete"
+
+if [ "$KEEP_RUNNING" -eq 1 ]; then
+    echo
+    say "--keep-running set: leaving daemons + bitcoind alive"
+    dim "  press enter to tear down (or Ctrl-C — trap will still fire)..."
+    # `|| true` so set -e doesn't trip if the user hits EOF instead of enter.
+    read -r _ || true
+fi
 echo
 dim "logs:"
 dim "  sequencer: $DATA_DIR/seq/log"

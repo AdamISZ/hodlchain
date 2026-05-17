@@ -1,10 +1,17 @@
 //! 32-byte hash newtype with hex display and sha256 helpers.
 
+use alloc::string::String;
+use core::fmt;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sha2::{Digest, Sha256};
-use std::fmt;
 
+/// 32-byte hash. Serialised as a 64-character lowercase hex string.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[cfg_attr(feature = "std", derive(utoipa::ToSchema))]
+#[cfg_attr(
+    feature = "std",
+    schema(value_type = String, example = "0000000000000000000000000000000000000000000000000000000000000000")
+)]
 pub struct H256(pub [u8; 32]);
 
 impl H256 {

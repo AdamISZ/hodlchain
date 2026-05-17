@@ -1,0 +1,18 @@
+# SP1 program crate. Compiled to the SP1 RISC-V zkVM target via
+# `cargo prove build`, NOT via the host's `cargo build`.
+#
+# Has its own `[workspace]` table so the parent's workspace doesn't try
+# to compile it for the host architecture.
+[package]
+name = "hodl-zk-program"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+# Pin a modern SP1; if this version is unavailable, the smoke test will
+# print a useful error and we just bump it. The toolchain side
+# (cargo-prove, prover key) is installed out-of-band via `sp1up`.
+sp1-zkvm = "6"
+
+[workspace]

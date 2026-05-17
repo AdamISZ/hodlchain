@@ -5,11 +5,34 @@ edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[features]
+# `std` enables: file-loading config types (config.rs), the utoipa
+# OpenAPI derives, json-using helpers. Off by default would break
+# every existing daemon, so it stays default-on. The zk-program
+# crate disables it.
+default = ["std"]
+std = [
+    "bitcoin/std",
+    "secp256k1/std",
+    "serde/std",
+    "serde/alloc",
+    "hex/std",
+    "sha2/std",
+    "thiserror/std",
+    "dep:serde_json",
+    "dep:utoipa",
+]
+
 [dependencies]
-bitcoin = { workspace = true }
-secp256k1 = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
-hex = { workspace = true }
-sha2 = { workspace = true }
+bitcoin = { workspace = true, default-features = false }
+secp256k1 = { workspace = true, default-features = false }
+serde = { workspace = true, default-features = false, features = ["derive", "alloc"] }
+hex = { workspace = true, default-features = false }
+sha2 = { workspace = true, default-features = false }
 thiserror = { workspace = true }
+once_cell = { workspace = true }
+libm = { workspace = true }
+
+# Optional, std-only.
+serde_json = { workspace = true, optional = true }
+utoipa = { workspace = true, optional = true }
