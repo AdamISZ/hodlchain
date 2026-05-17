@@ -22,6 +22,12 @@ pub struct WalletFile {
     pub sequencer_url: String,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub node_url: Option<String>,
+    /// Esplora HTTP base URL for light-client mode (e.g.
+    /// `https://mempool.space/api`). The two endpoints used are
+    /// `/tx/:txid` and `/tx/:txid/outspend/:vout`. The demo points
+    /// this at `hodl-node` which exposes the same shape.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub esplora_url: Option<String>,
     #[serde(default)]
     pub mints: Vec<MintRecord>,
 }

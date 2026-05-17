@@ -177,9 +177,21 @@ async fn get_balance(
 ) -> Result<Json<BalanceResponse>, ApiError> {
     let addr: L2Address = parse_xonly(&addr_hex).map_err(ApiError)?;
     let state = app.shared.state.lock().unwrap();
+    let head_height = app.shared.head.lock().unwrap().height;
     let balance = state.balance_of(&addr);
     let nonce = state.nonce_of(&addr);
-    Ok(Json(BalanceResponse { address: addr, balance, nonce }))
+    let proof = state.account_inclusion_proof(addr);
+    let components = state.components();
+    let state_root = components.state_root();
+    Ok(Json(BalanceResponse {
+        address: addr,
+        balance,
+        nonce,
+        l2_height: head_height,
+        state_root,
+        state_components: components,
+        proof,
+    }))
 }
 
 async fn get_block(

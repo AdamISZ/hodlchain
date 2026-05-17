@@ -2,6 +2,7 @@
 //! optionally the node (balance lookup).
 
 use anyhow::{anyhow, Context, Result};
+use hodl_core::block::L2Block;
 use hodl_core::proof::MintProofEnvelope;
 use hodl_core::rpc::{
     BalanceResponse, HeadResponse, SubmitMintRequest, SubmitMintResponse,
@@ -48,6 +49,22 @@ impl ApiClient {
         let body: SubmitTransferResponse = resp.json().await
             .with_context(|| format!("decode response from {url} (status={status})"))?;
         Ok(body)
+    }
+
+    /// Fetch an L2 block by height. Prefers the node (more trust-aligned
+    /// for light clients); falls back to the sequencer if no node is
+    /// configured.
+    pub async fn get_block(&self, height: u32) -> Result<L2Block> {
+        let base = self.node_url.as_deref().unwrap_or(&self.sequencer_url);
+        let url = format!("{}/block/{}", base.trim_end_matches('/'), height);
+        let resp = self.http.get(&url).send().await
+            .with_context(|| format!("GET {url}"))?;
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(anyhow!("{url} returned HTTP {status}"));
+        }
+        Ok(resp.json::<L2Block>().await
+            .with_context(|| format!("decode L2Block from {url}"))?)
     }
 
     /// Sequencer head — used for both `head` queries and as a fallback for

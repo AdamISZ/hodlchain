@@ -2,6 +2,8 @@
 
 use crate::hash::H256;
 use crate::proof::MintProofEnvelope;
+use crate::smt::InclusionProof;
+use crate::state::StateComponents;
 use crate::tx::{Amount, L2Address, SignedTransfer};
 use serde::{Deserialize, Serialize};
 
@@ -47,4 +49,18 @@ pub struct BalanceResponse {
     pub address: L2Address,
     pub balance: Amount,
     pub nonce: u64,
+    /// L2 height of the state these values are drawn from.
+    pub l2_height: u32,
+    /// The state_root computed at that L2 height. Redundant given
+    /// `state_components` (it's their hash) but convenient for display
+    /// and direct comparison against the L1-derived value.
+    pub state_root: H256,
+    /// Snapshot of the other inputs to `state_root`. A light client
+    /// recomputes `state_components.state_root()` and checks it agrees
+    /// with `state_root` (self-consistency) and with the L1-derived
+    /// value for the same L2 height (binding to the chain).
+    pub state_components: StateComponents,
+    /// SMT inclusion (or non-inclusion) proof for `address` against
+    /// `state_components.accounts_root`.
+    pub proof: InclusionProof,
 }

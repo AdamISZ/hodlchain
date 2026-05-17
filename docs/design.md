@@ -181,7 +181,18 @@ L2Block { header, txs: Vec<L2Tx> }
 - `Mint(MintEntry { event, witness })` — both the declared outcome (amount, nullifier, destination, lock parameters, L1 value) AND the proof. Nodes re-run `verify_mint_entry(entry, &secp, &l1, r)` for every mint in every block; a mismatch between what the witness authorises and what the event declares fails block validation. Block validity is therefore independent of trusting the sequencer.
 - `Transfer(SignedTransfer)` — `(from, to, amount, nonce, schnorr_sig)`. Sighash: `sha256("hodl-transfer-v0" || json(body))`.
 
-State is a pair of maps: `accounts: BTreeMap<L2Address, Account>` and `consumed_nullifiers: BTreeSet<String>`. State root is `sha256("hodl-state-v0" || serialized(accounts) || "|nullifiers|" || serialized(nullifiers))`. A real Merkle tree (so light clients can produce inclusion proofs) can be retrofitted later without changing the on-chain commitment.
+State is a pair of maps: `accounts: BTreeMap<L2Address, Account>` and `consumed_nullifiers: BTreeSet<String>`, plus the retarget scalars `current_r`, `current_window_atoms`, `current_window_start_height`. The `state_root` is
+
+```text
+sha256(
+  "hodl-state-v1" ||
+  accounts_root  ||             // 256-level sparse Merkle tree
+  nullifiers_hash ||
+  retarget_blob
+)
+```
+
+where `accounts_root` is a sparse Merkle tree over the accounts map, keyed by the 32-byte x-only L2 address. Each populated leaf hashes `(addr, balance_be, nonce_be)` under tag `"hodl-smt-leaf-v0"`; unpopulated subtrees use a precomputed default-hash cache. This structure supports `O(log N)` inclusion proofs (and `O(log N)` non-inclusion proofs for addresses that don't exist), which is what enables the light-client model in the next section. `nullifiers_hash` is just a flat sorted-list hash — users don't query the nullifier set, and intra-L2 anti-reuse is enforced at apply time.
 
 ## L1 attestation chain
 
@@ -259,6 +270,116 @@ other is invalidated by the L1 mempool / consensus.
   ~500 attestations; at signet rates (~1 sat/vB), ~3500 days of
   attestations. Production deployment would need an operator top-up
   mechanism (out of POC scope).
+
+## Light clients
+
+The UX target is: heavy setup (locking BTC, minting UTXOs) lives on a
+desktop with full L1 access; everyday L2 usage (querying balance,
+sending transfers) runs on a phone with nothing but HTTP. The chain-of-
+anchors construction makes this almost-free; Merkleized state is the
+last ingredient.
+
+### Trust tiers a client can choose
+
+1. **Full validator** (`hodl-node` today): owns a bitcoind, replays
+   every L2 block, re-verifies every mint witness against L1, recomputes
+   `state_root`. Trusts nothing.
+2. **L1-light validator** (future): same L2 logic, but reads L1 via an
+   Esplora server instead of running bitcoind. Still does full L2 replay,
+   so desktop-class.
+3. **State-light**: doesn't replay L2 at all. Walks the L1 attestation
+   chain via a block-explorer API to learn the current `state_root`, then
+   verifies its own account via an SMT inclusion proof against that
+   root. Phone-class. Trust gap (v0): state-correctness of the
+   transition itself. Closed later by a ZK validity proof.
+4. **Pure RPC**: polls the sequencer for balance; verifies nothing.
+
+### L1 walk via Esplora
+
+A state-light client takes the genesis anchor outpoint (read once from
+the L2 genesis header at install time or shipped in client config) and
+walks the L1 chain by alternating two Esplora endpoints:
+
+```text
+GET /tx/:txid/outspend/:vout      → next tx that spent this outpoint
+GET /tx/:txid                     → that tx's full structure
+```
+
+For each step, parse `vout[0]` as a hodlcoin OP_RETURN attestation
+payload, record `(height, block_hash, state_root)`, advance to
+`new_anchor = (txid, 1)`. Two cheap HTTP calls per L2 block. No
+bitcoind required. The Esplora endpoint is a single dependency on a
+third-party (or self-hosted) service; well-established phone-Bitcoin-
+wallet pattern.
+
+### State-light balance verification
+
+The sequencer / node exposes `GET /balance/:addr` returning the L2
+account plus an SMT inclusion proof against the latest `state_root`
+they have. The light client checks:
+
+1. The returned `state_root` matches the one it pulled off L1 for the
+   declared L2 height.
+2. The inclusion proof (256 sibling hashes, leaf-to-root) reconstructs
+   `state_root` from the claimed `(balance, nonce)` leaf.
+
+Non-existent accounts return a non-inclusion proof (`LeafKind::Empty`)
+which verifies the same way; a light client whose first action is
+"check that my balance is zero before I do anything" gets a meaningful
+answer.
+
+### Why no live L1 watching during the lock
+
+Worth stating explicitly: between a user's mint and their unlock, there
+is no on-chain event they must react to. The funding UTXO is provably
+unspendable by anyone (NUMS internal key + CSV) for `lock_blocks`
+blocks. There is no escape hatch, no challenge window, no fee bumping
+they need to do. A phone-only user who's been offline for a week
+catches up on a week of attestations in one Esplora-walking burst when
+they come back online.
+
+L1 is only needed for: minting a new UTXO; reclaiming after the lock;
+being a full validator (re-verifying mint witnesses themselves).
+
+### What's wired today
+
+POC implementation (`hodl-wallet`):
+
+- `verify-balance` — query `/balance/:addr` (now carrying the SMT
+  inclusion proof + `state_components`), re-derive `state_root` from
+  components, verify the SMT proof, check the leaf payload. Optional
+  `--against <hex>` for binding to an externally-supplied state_root.
+- `light-head` — fetch L2 genesis from the L2 RPC for `anchor_0`,
+  walk the attestation chain via Esplora endpoints
+  (`/tx/:txid/outspend/:vout` + `/tx/:txid`), report the latest
+  `state_root` derived from L1.
+- `light-balance` — `light-head` followed by `verify-balance --against
+  <L1-derived state_root>` in one go. Trustless against the chosen
+  Esplora.
+
+The demo runs all of `verify-balance`, `light-head`, `light-balance`
+against `hodl-node`, which exposes the Esplora-compatible subset
+(`GET /tx/:txid` and `GET /tx/:txid/outspend/:vout`) backed by its
+own `anchor_spends` SQLite index plus bitcoind's `getrawtransaction`
+(`txindex=1` required). In production the wallet's `esplora_url` would
+point at mempool.space / an electrs deployment / the user's own
+electrs, *not* at hodl-node — the API surface is the same.
+
+### Where light-client trust still leaks (v0)
+
+- **State-transition correctness** — the light client trusts that
+  `state_root` is the *valid* result of applying the L2 block's txs.
+  In v0 this is an honest-majority assumption among full validators
+  (`hodl-node`). In a later iteration, a ZK validity proof shipped
+  alongside each block body closes this gap entirely.
+- **Block-body availability** — to compute one's own balance one needs
+  to ask *someone* who can produce the inclusion proof. The sequencer
+  is the obvious candidate; nodes can also serve it. A malicious
+  sequencer that refuses to serve a particular user's proof censors
+  that user. Migrating to a public DA layer (e.g. Celestia) for block
+  bodies closes this.
+- **Sequencer liveness** — the sequencer can stop producing blocks at
+  will. Replaced later by multi-sequencer / sequencer rotation.
 
 ## Mint witness pluggability
 

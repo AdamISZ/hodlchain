@@ -4,15 +4,19 @@
 
 mod api;
 mod bitcoind;
+mod esplora;
 mod wallet;
 
 use anyhow::{anyhow, bail, Context, Result};
 use bitcoin::secp256k1::{rand, Message, Secp256k1, XOnlyPublicKey};
 use bitcoin::{Amount, OutPoint};
 use clap::{Parser, Subcommand};
+use hodl_core::hash::H256;
 use hodl_core::l1::{derive_mint_taproot, mint_address};
 use hodl_core::proof::OutpointProof;
 use hodl_core::proof::MintProofEnvelope;
+use hodl_core::smt::LeafKind;
+use hodl_core::state::LedgerState;
 use hodl_core::tx::{SignedTransfer, TransferBody};
 use std::path::PathBuf;
 
@@ -50,8 +54,23 @@ enum Cmd {
     Transfer(TransferArgs),
     /// Query an L2 balance.
     Balance(BalanceArgs),
+    /// Query an L2 balance AND cryptographically verify the
+    /// inclusion proof against the response's state_root.
+    /// With `--against`, also check that state_root matches an
+    /// externally-supplied value (e.g. one obtained from L1 via
+    /// the attestation chain).
+    VerifyBalance(VerifyBalanceArgs),
     /// Query sequencer head.
     Head,
+    /// Light-client mode: walk the L1 attestation chain via the
+    /// configured Esplora endpoint and report the current L2 head's
+    /// state_root. No bitcoin node required.
+    LightHead,
+    /// Light-client mode: walk the L1 chain to derive the current
+    /// state_root, then query an L2 balance with proof and verify the
+    /// proof against the L1-derived state_root. End-to-end trustless
+    /// (against the chosen Esplora) verification of an account's value.
+    LightBalance(LightBalanceArgs),
 }
 
 #[derive(clap::Args, Debug)]
@@ -70,6 +89,11 @@ struct KeygenArgs {
     sequencer_url: String,
     #[arg(long)]
     node_url: Option<String>,
+    /// Esplora HTTP base URL for light-client mode (light-head /
+    /// light-balance). Demo points it at hodl-node which exposes a
+    /// slim Esplora-compatible subset.
+    #[arg(long)]
+    esplora_url: Option<String>,
     /// Overwrite an existing wallet file at the target path.
     #[arg(long)]
     force: bool,
@@ -114,6 +138,26 @@ struct BalanceArgs {
     addr: Option<String>,
 }
 
+#[derive(clap::Args, Debug)]
+struct LightBalanceArgs {
+    /// Address to query (x-only pubkey hex). Defaults to our own address.
+    #[arg(long)]
+    addr: Option<String>,
+}
+
+#[derive(clap::Args, Debug)]
+struct VerifyBalanceArgs {
+    /// Address to query (x-only pubkey hex). Defaults to our own address.
+    #[arg(long)]
+    addr: Option<String>,
+    /// Optional 32-byte hex state_root to compare against. If supplied,
+    /// the verification also checks that the response's state_root
+    /// equals this value — the binding to L1. In Phase 3, the
+    /// light-client mode reads this off the L1 attestation chain.
+    #[arg(long)]
+    against: Option<String>,
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -129,7 +173,10 @@ async fn main() -> Result<()> {
         Cmd::MintMessage(args) => cmd_mint_message(&cli.wallet, args).await,
         Cmd::Transfer(args) => cmd_transfer(&cli.wallet, args).await,
         Cmd::Balance(args) => cmd_balance(&cli.wallet, args).await,
+        Cmd::VerifyBalance(args) => cmd_verify_balance(&cli.wallet, args).await,
         Cmd::Head => cmd_head(&cli.wallet).await,
+        Cmd::LightHead => cmd_light_head(&cli.wallet).await,
+        Cmd::LightBalance(args) => cmd_light_balance(&cli.wallet, args).await,
     }
 }
 
@@ -156,6 +203,7 @@ fn cmd_keygen(path: &std::path::Path, args: KeygenArgs) -> Result<()> {
         bitcoind: BitcoindConfig { url: args.bitcoind_url, auth },
         sequencer_url: args.sequencer_url,
         node_url: args.node_url,
+        esplora_url: args.esplora_url,
         mints: Vec::new(),
     };
     wf.save(path)?;
@@ -309,12 +357,167 @@ async fn cmd_balance(path: &std::path::Path, args: BalanceArgs) -> Result<()> {
     Ok(())
 }
 
+async fn cmd_verify_balance(
+    path: &std::path::Path,
+    args: VerifyBalanceArgs,
+) -> Result<()> {
+    let wf = WalletFile::load(path)?;
+    let secp = Secp256k1::new();
+    let target = match args.addr {
+        Some(s) => parse_xonly(&s)?,
+        None => wf.xonly_pubkey(&secp)?,
+    };
+    let api = ApiClient::new(wf.sequencer_url.clone(), wf.node_url.clone());
+    let bal = api.balance(&target).await?;
+
+    // 1. Self-consistency: the response's state_components must hash to
+    //    the state_root the response also reports. A sloppy server
+    //    sending mismatched values is caught here.
+    let derived = bal.state_components.state_root();
+    if derived != bal.state_root {
+        bail!(
+            "response self-inconsistent: components.state_root()={} != reported state_root={}",
+            derived,
+            bal.state_root
+        );
+    }
+
+    // 2. Optional binding to an externally-supplied state_root (the L1
+    //    chain walk). When this matches, the proof's relationship to
+    //    L1 is established and the server is fully checked.
+    if let Some(s) = args.against.as_ref() {
+        let expected =
+            H256::from_hex(s).context("parse --against hex")?;
+        if expected != bal.state_root {
+            bail!(
+                "state_root mismatch: response says {}, --against says {}",
+                bal.state_root,
+                expected
+            );
+        }
+    }
+
+    // 3. SMT proof verifies against the accounts_root.
+    if bal.proof.address != bal.address {
+        bail!(
+            "proof address {} disagrees with response address {}",
+            hex::encode(bal.proof.address.serialize()),
+            hex::encode(bal.address.serialize())
+        );
+    }
+    if !bal.proof.verify(bal.state_components.accounts_root) {
+        bail!("inclusion proof does not verify against accounts_root");
+    }
+
+    // 4. Proof leaf payload must equal the reported balance/nonce.
+    match &bal.proof.leaf {
+        LeafKind::Account { balance, nonce } => {
+            if *balance != bal.balance {
+                bail!(
+                    "proof leaf balance {} disagrees with reported balance {}",
+                    balance, bal.balance
+                );
+            }
+            if *nonce != bal.nonce {
+                bail!(
+                    "proof leaf nonce {} disagrees with reported nonce {}",
+                    nonce, bal.nonce
+                );
+            }
+        }
+        LeafKind::Empty => {
+            if bal.balance != 0 || bal.nonce != 0 {
+                bail!(
+                    "proof claims no-such-account but reported balance/nonce are non-zero ({}, {})",
+                    bal.balance, bal.nonce
+                );
+            }
+        }
+    }
+
+    println!("verified");
+    println!("  address:     {}", hex::encode(target.serialize()));
+    println!("  balance:     {} atoms", bal.balance);
+    println!("  nonce:       {}", bal.nonce);
+    println!("  l2_height:   {}", bal.l2_height);
+    println!("  state_root:  {}", bal.state_root);
+    if args.against.is_some() {
+        println!("  ⇒ state_root matches --against value (bound to L1)");
+    } else {
+        println!("  ⇒ state_root not checked against an external source");
+        println!("    (pass --against <hex> to bind to L1 in light-client mode)");
+    }
+    Ok(())
+}
+
 async fn cmd_head(path: &std::path::Path) -> Result<()> {
     let wf = WalletFile::load(path)?;
     let api = ApiClient::new(wf.sequencer_url.clone(), wf.node_url.clone());
     let head = api.sequencer_head().await?;
     println!("{}", serde_json::to_string_pretty(&head)?);
     Ok(())
+}
+
+/// Pull L2 genesis, extract anchor_0, walk the L1 attestation chain via
+/// the configured Esplora endpoint. Returns the latest state_root
+/// (genesis's empty-state root if no attestations exist yet).
+async fn derive_state_root_from_l1(
+    wf: &WalletFile,
+) -> Result<(H256, u32, usize)> {
+    let esplora_url = wf
+        .esplora_url
+        .as_ref()
+        .ok_or_else(|| anyhow!("wallet has no esplora_url configured; pass --esplora-url to keygen"))?;
+
+    // Bootstrap: fetch L2 genesis from the L2 RPC for anchor_0.
+    let api = ApiClient::new(wf.sequencer_url.clone(), wf.node_url.clone());
+    let genesis = api
+        .get_block(0)
+        .await
+        .context("fetch L2 genesis (height 0) for anchor_0 bootstrap")?;
+    let anchor_0 = genesis
+        .header
+        .anchor_outpoint
+        .ok_or_else(|| anyhow!("L2 genesis header has no anchor_outpoint"))?;
+
+    // Walk forward via Esplora.
+    let esplora = esplora::EsploraClient::new(esplora_url.clone());
+    let chain = esplora::walk_attestation_chain(&esplora, anchor_0).await?;
+    if chain.is_empty() {
+        // No attestations yet — the head is genesis. State_root is the
+        // empty-LedgerState root.
+        return Ok((LedgerState::new().state_root(), 0, 0));
+    }
+    let last = chain.last().unwrap();
+    Ok((last.attestation.state_root, last.attestation.height, chain.len()))
+}
+
+async fn cmd_light_head(path: &std::path::Path) -> Result<()> {
+    let wf = WalletFile::load(path)?;
+    let (state_root, l2_height, walked) = derive_state_root_from_l1(&wf).await?;
+    println!("L2 head (derived from L1 attestation chain via Esplora):");
+    println!("  l2_height:  {}", l2_height);
+    println!("  state_root: {}", state_root);
+    println!("  walked {} attestation(s) from anchor_0", walked);
+    Ok(())
+}
+
+async fn cmd_light_balance(
+    path: &std::path::Path,
+    args: LightBalanceArgs,
+) -> Result<()> {
+    // Reuse cmd_verify_balance with --against pre-populated from the L1 walk.
+    let wf = WalletFile::load(path)?;
+    let (state_root, l2_height, walked) = derive_state_root_from_l1(&wf).await?;
+    println!("L1-derived state_root at height {l2_height} (walked {walked}): {state_root}");
+    cmd_verify_balance(
+        path,
+        VerifyBalanceArgs {
+            addr: args.addr,
+            against: Some(state_root.to_hex()),
+        },
+    )
+    .await
 }
 
 fn parse_xonly(s: &str) -> Result<XOnlyPublicKey> {

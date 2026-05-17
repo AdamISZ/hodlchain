@@ -106,6 +106,10 @@ mkdir -p "$DATA_DIR/bitcoin"
 
 cat > "$DATA_DIR/bitcoin/bitcoin.conf" <<EOF
 fallbackfee=0.00001
+# txindex=1 lets `getrawtransaction <txid>` succeed without a wallet
+# context or a blockhash hint — required for the node's Esplora-
+# compatible /tx/:txid endpoint that light wallets walk through.
+txindex=1
 [regtest]
 rpcport=$BTC_RPC
 EOF
@@ -219,6 +223,7 @@ say "keygen Alice & Bob"
     --bitcoind-cookie "$COOKIE" \
     --sequencer-url "http://127.0.0.1:$SEQ_PORT" \
     --node-url "http://127.0.0.1:$NODE_PORT" \
+    --esplora-url "http://127.0.0.1:$NODE_PORT" \
     | sed 's/^/    /'
 "$WALLET_BIN" --wallet "$BOB_WALLET" keygen \
     --network regtest \
@@ -308,6 +313,26 @@ echo "    alice: $("$WALLET_BIN" --wallet "$ALICE_WALLET" balance | grep balance
 echo "    bob:   $("$WALLET_BIN" --wallet "$BOB_WALLET"   balance | grep balance)"
 say "node head"
 curl -s "http://127.0.0.1:$NODE_PORT/head" | jq . | sed 's/^/    /'
+
+# Cryptographically verify Alice's balance via the inclusion proof.
+say "verifying alice's balance against the node's state_root (Phase 2)"
+"$WALLET_BIN" --wallet "$ALICE_WALLET" verify-balance | sed 's/^/    /'
+
+# Also verify a non-existent third-party address — should come back as
+# an empty-leaf proof that still verifies.
+THIRD=0000000000000000000000000000000000000000000000000000000000000001
+say "verifying a non-existent address (expect: empty leaf, balance=0)"
+"$WALLET_BIN" --wallet "$ALICE_WALLET" verify-balance --addr "$THIRD" | sed 's/^/    /'
+
+# Phase 3: light-client mode. Walk the L1 attestation chain via the
+# Esplora-compatible endpoints on hodl-node, derive the current
+# state_root from L1, then verify alice's inclusion proof against THAT
+# state_root. No bitcoind RPC used by the wallet for this step.
+say "light-client head (derive state_root from L1 attestation chain via Esplora)"
+"$WALLET_BIN" --wallet "$ALICE_WALLET" light-head | sed 's/^/    /'
+
+say "light-client balance for alice (L1-walk + proof verify, end-to-end)"
+"$WALLET_BIN" --wallet "$ALICE_WALLET" light-balance | sed 's/^/    /'
 
 ok "demo complete"
 echo

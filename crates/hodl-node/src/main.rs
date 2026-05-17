@@ -90,7 +90,7 @@ async fn run(config_path: &std::path::Path) -> Result<()> {
     };
     tokio::spawn(follower.run());
 
-    let app_state = AppState { shared: shared.clone(), store: store.clone() };
+    let app_state = AppState { shared: shared.clone(), store: store.clone(), l1: l1.clone() };
     let app = api::router(app_state);
 
     let listener = tokio::net::TcpListener::bind(cfg.listen).await

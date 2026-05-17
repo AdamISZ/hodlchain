@@ -10,6 +10,7 @@ pub mod l1;
 pub mod op_return;
 pub mod proof;
 pub mod rpc;
+pub mod smt;
 pub mod state;
 pub mod tx;
 

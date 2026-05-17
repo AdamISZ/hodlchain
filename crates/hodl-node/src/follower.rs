@@ -183,6 +183,9 @@ impl Follower {
             let mut store = self.store.lock().unwrap();
             store.write_block_and_state(&block, &*self.shared.state.lock().unwrap())?;
             store.set_anchor(&adv.new_anchor)?;
+            // Record the chain link for the Esplora-compatible /outspend
+            // endpoint that light clients walk.
+            store.record_anchor_spend(&adv.spent_anchor, &adv.txid, adv.l1_height)?;
         }
         {
             let mut head = self.shared.head.lock().unwrap();

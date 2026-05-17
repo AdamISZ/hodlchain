@@ -13,6 +13,7 @@ use crate::consensus::{
     INITIAL_R, RETARGET_MAX_FACTOR, RETARGET_WINDOW_BLOCKS, TARGET_ATOMS_PER_BLOCK,
 };
 use crate::hash::H256;
+use crate::smt;
 use crate::tx::{Amount, L2Address, L2Tx, MintEntry, SignedTransfer};
 use bitcoin::secp256k1::{Message, Secp256k1, Verification};
 use serde::{Deserialize, Serialize};
@@ -164,23 +165,79 @@ impl LedgerState {
         Ok(())
     }
 
-    /// Deterministic state root: sha256 over a canonical encoding of
-    /// (accounts, consumed_nullifiers). BTreeMap/BTreeSet give us stable
-    /// ordering; serde_json is canonical-enough for the POC.
-    pub fn state_root(&self) -> H256 {
-        let mut h = Sha256::new();
-        h.update(b"hodl-state-v0");
+    /// Compute the SMT root over the accounts table. Light clients use
+    /// this — combined with an `InclusionProof` for their account — to
+    /// verify their balance against the on-chain `state_root`.
+    pub fn accounts_root(&self) -> H256 {
+        let accts: Vec<(L2Address, &Account)> =
+            self.accounts.iter().map(|(a, c)| (*a, c)).collect();
+        smt::compute_root(&accts)
+    }
 
-        // accounts in key order
-        for (addr, acct) in &self.accounts {
-            h.update(&addr.serialize());
-            h.update(&acct.balance.to_be_bytes());
-            h.update(&acct.nonce.to_be_bytes());
-        }
-        h.update(b"|nullifiers|");
+    /// Build an SMT inclusion (or non-inclusion, if absent) proof for
+    /// `addr`. The proof verifies against `accounts_root()`.
+    pub fn account_inclusion_proof(&self, addr: L2Address) -> smt::InclusionProof {
+        let accts: Vec<(L2Address, &Account)> =
+            self.accounts.iter().map(|(a, c)| (*a, c)).collect();
+        smt::compute_proof(&accts, addr)
+    }
+
+    /// Hash of the consumed-nullifier set. Cheap sorted-list hash — no
+    /// inclusion proofs needed for v0 (nullifier set is used to prevent
+    /// double-mint at apply time; users don't query it).
+    pub fn nullifiers_hash(&self) -> H256 {
+        let mut h = Sha256::new();
+        h.update(b"hodl-nullifiers-v0");
         for n in &self.consumed_nullifiers {
             h.update(n.as_bytes());
         }
+        H256(h.finalize().into())
+    }
+
+    /// Snapshot the inputs to `state_root`. A light client given a
+    /// `StateComponents` can re-derive the L1-committed state_root and
+    /// independently verify it.
+    pub fn components(&self) -> StateComponents {
+        StateComponents {
+            accounts_root: self.accounts_root(),
+            nullifiers_hash: self.nullifiers_hash(),
+            current_r: self.current_r,
+            current_window_atoms: self.current_window_atoms,
+            current_window_start_height: self.current_window_start_height,
+        }
+    }
+
+    /// Deterministic state root: hash over (accounts_root, nullifiers_hash,
+    /// retarget_blob). Replaces the previous flat-serialisation hash;
+    /// `accounts_root` is now Merkle-structured so light clients can
+    /// produce inclusion proofs.
+    pub fn state_root(&self) -> H256 {
+        self.components().state_root()
+    }
+}
+
+/// The inputs that `state_root` hashes together. Producer / node /
+/// light-client all agree on this struct; making it explicit lets a
+/// light client receiving (accounts_root, nullifiers_hash, retarget
+/// scalars) recompute the `state_root` and compare against the value
+/// it pulled off L1.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct StateComponents {
+    pub accounts_root: H256,
+    pub nullifiers_hash: H256,
+    pub current_r: f64,
+    pub current_window_atoms: u64,
+    pub current_window_start_height: u32,
+}
+
+impl StateComponents {
+    /// Canonical state-root hash. Same byte layout as
+    /// `LedgerState::state_root`.
+    pub fn state_root(&self) -> H256 {
+        let mut h = Sha256::new();
+        h.update(b"hodl-state-v1");
+        h.update(&self.accounts_root.0);
+        h.update(&self.nullifiers_hash.0);
         h.update(b"|retarget|");
         h.update(&self.current_r.to_le_bytes());
         h.update(&self.current_window_atoms.to_be_bytes());
@@ -274,6 +331,38 @@ mod tests {
         let r0 = state.current_r;
         state.end_of_block(0);
         assert_eq!(state.current_r, r0);
+    }
+
+    #[test]
+    fn account_inclusion_proof_verifies_against_accounts_root() {
+        let secp = Secp256k1::new();
+        let alice_kp = Keypair::new(&secp, &mut bitcoin::secp256k1::rand::thread_rng());
+        let (alice, _) = alice_kp.x_only_public_key();
+        let bob_kp = Keypair::new(&secp, &mut bitcoin::secp256k1::rand::thread_rng());
+        let (bob, _) = bob_kp.x_only_public_key();
+        let mallory_kp = Keypair::new(&secp, &mut bitcoin::secp256k1::rand::thread_rng());
+        let (mallory, _) = mallory_kp.x_only_public_key();
+
+        let mut state = LedgerState::new();
+        state.apply(&secp, &L2Tx::Mint(stub_entry("aa", 1000, alice, &alice_kp))).unwrap();
+        state.apply(&secp, &L2Tx::Mint(stub_entry("bb", 500, bob, &bob_kp))).unwrap();
+
+        let root = state.accounts_root();
+
+        // Alice: inclusion proof.
+        let p = state.account_inclusion_proof(alice);
+        assert!(matches!(p.leaf, crate::smt::LeafKind::Account { balance: 1000, nonce: 0 }));
+        assert!(p.verify(root));
+
+        // Bob: inclusion proof.
+        let p = state.account_inclusion_proof(bob);
+        assert!(matches!(p.leaf, crate::smt::LeafKind::Account { balance: 500, nonce: 0 }));
+        assert!(p.verify(root));
+
+        // Mallory: non-inclusion proof (no account).
+        let p = state.account_inclusion_proof(mallory);
+        assert_eq!(p.leaf, crate::smt::LeafKind::Empty);
+        assert!(p.verify(root));
     }
 
     #[test]

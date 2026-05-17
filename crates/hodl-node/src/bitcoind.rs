@@ -21,6 +21,8 @@ pub struct ChainAdvance {
     pub l1_height: u32,
     /// The attestation tx's own txid (for diagnostics / logs).
     pub txid: Txid,
+    /// The chain anchor that was spent to produce this attestation.
+    pub spent_anchor: OutPoint,
     /// The new chain anchor — vout=1 of the attestation tx.
     pub new_anchor: OutPoint,
 }
@@ -37,6 +39,13 @@ impl NodeL1 {
         let c = self.client.lock().unwrap();
         let n = c.get_block_count()?;
         u32::try_from(n).map_err(|_| anyhow!("block count overflows u32: {n}"))
+    }
+
+    /// Fetch a transaction by txid. Returns the deserialised `bitcoin::Transaction`
+    /// so callers can shape it however they want (e.g. into Esplora JSON).
+    pub fn get_tx(&self, txid: &Txid) -> Result<bitcoin::Transaction> {
+        let c = self.client.lock().unwrap();
+        Ok(c.get_raw_transaction(txid, None)?)
     }
 
     /// Walk every tx in L1 block `h` looking for one that spends
@@ -85,6 +94,7 @@ impl NodeL1 {
                 attestation: att,
                 l1_height: h,
                 txid,
+                spent_anchor: *current_anchor,
                 new_anchor,
             }));
         }

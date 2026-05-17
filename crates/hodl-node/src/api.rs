@@ -11,10 +11,14 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use bitcoin::secp256k1::XOnlyPublicKey;
+use bitcoin::Txid;
 use hodl_core::rpc::{BalanceResponse, HeadResponse};
 use hodl_core::tx::L2Address;
+use serde::Serialize;
+use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 
+use crate::bitcoind::NodeL1;
 use crate::shared::Shared;
 use crate::store::Store;
 
@@ -22,6 +26,7 @@ use crate::store::Store;
 pub struct AppState {
     pub shared: Arc<Shared>,
     pub store: Arc<Mutex<Store>>,
+    pub l1: Arc<NodeL1>,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -29,6 +34,10 @@ pub fn router(state: AppState) -> Router {
         .route("/head", get(get_head))
         .route("/balance/:addr", get(get_balance))
         .route("/block/:height", get(get_block))
+        // Esplora-compatible (slim) endpoints so light wallets can walk
+        // the L1 attestation chain via standard HTTP without bitcoind.
+        .route("/tx/:txid", get(esplora_get_tx))
+        .route("/tx/:txid/outspend/:vout", get(esplora_outspend))
         .with_state(state)
 }
 
@@ -60,9 +69,21 @@ async fn get_balance(
 ) -> Result<Json<BalanceResponse>, ApiError> {
     let addr: L2Address = parse_xonly(&addr_hex).map_err(ApiError)?;
     let state = app.shared.state.lock().unwrap();
+    let head_height = app.shared.head.lock().unwrap().height;
     let balance = state.balance_of(&addr);
     let nonce = state.nonce_of(&addr);
-    Ok(Json(BalanceResponse { address: addr, balance, nonce }))
+    let proof = state.account_inclusion_proof(addr);
+    let components = state.components();
+    let state_root = components.state_root();
+    Ok(Json(BalanceResponse {
+        address: addr,
+        balance,
+        nonce,
+        l2_height: head_height,
+        state_root,
+        state_components: components,
+        proof,
+    }))
 }
 
 async fn get_block(
@@ -79,4 +100,102 @@ async fn get_block(
 fn parse_xonly(s: &str) -> anyhow::Result<XOnlyPublicKey> {
     let bytes = hex::decode(s)?;
     Ok(XOnlyPublicKey::from_slice(&bytes)?)
+}
+
+// ---------- Esplora-compatible (slim) responses --------------------------
+//
+// These are the subset of Esplora's HTTP API needed by hodlcoin light
+// clients to walk the attestation chain. Returned JSON fields match the
+// Esplora schema where present; full Esplora responses have more fields
+// (block status, fee, sizes, etc.) that we omit. Pointing a hodlcoin
+// light client at a real Esplora endpoint (e.g. mempool.space) works
+// identically — the wallet just ignores the extra fields.
+
+#[derive(Serialize)]
+struct EsploraTx {
+    txid: String,
+    vin: Vec<EsploraVin>,
+    vout: Vec<EsploraVout>,
+}
+
+#[derive(Serialize)]
+struct EsploraVin {
+    txid: String,
+    vout: u32,
+}
+
+#[derive(Serialize)]
+struct EsploraVout {
+    /// scriptPubKey, hex-encoded.
+    scriptpubkey: String,
+    /// Output value in satoshis.
+    value: u64,
+}
+
+#[derive(Serialize)]
+struct EsploraOutspend {
+    spent: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    txid: Option<String>,
+    /// L1 block height at which the spending tx was mined.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    block_height: Option<u32>,
+}
+
+async fn esplora_get_tx(
+    State(app): State<AppState>,
+    Path(txid_hex): Path<String>,
+) -> Result<Response, ApiError> {
+    let txid = Txid::from_str(&txid_hex)
+        .map_err(|e| ApiError(anyhow::anyhow!("bad txid {txid_hex}: {e}")))?;
+    let l1 = app.l1.clone();
+    let tx = tokio::task::spawn_blocking(move || l1.get_tx(&txid))
+        .await
+        .map_err(|e| ApiError(anyhow::anyhow!("join: {e}")))?;
+    let tx = match tx {
+        Ok(t) => t,
+        Err(_) => return Ok((StatusCode::NOT_FOUND, "tx not found").into_response()),
+    };
+    let body = EsploraTx {
+        txid: tx.compute_txid().to_string(),
+        vin: tx
+            .input
+            .iter()
+            .map(|i| EsploraVin {
+                txid: i.previous_output.txid.to_string(),
+                vout: i.previous_output.vout,
+            })
+            .collect(),
+        vout: tx
+            .output
+            .iter()
+            .map(|o| EsploraVout {
+                scriptpubkey: hex::encode(o.script_pubkey.as_bytes()),
+                value: o.value.to_sat(),
+            })
+            .collect(),
+    };
+    Ok(Json(body).into_response())
+}
+
+async fn esplora_outspend(
+    State(app): State<AppState>,
+    Path((txid_hex, vout)): Path<(String, u32)>,
+) -> Result<Json<EsploraOutspend>, ApiError> {
+    // Validate the txid format but we look it up as a string.
+    let _ = Txid::from_str(&txid_hex)
+        .map_err(|e| ApiError(anyhow::anyhow!("bad txid {txid_hex}: {e}")))?;
+    let store = app.store.lock().unwrap();
+    Ok(Json(match store.get_anchor_spender(&txid_hex, vout)? {
+        Some((spender_txid, height)) => EsploraOutspend {
+            spent: true,
+            txid: Some(spender_txid.to_string()),
+            block_height: Some(height),
+        },
+        None => EsploraOutspend {
+            spent: false,
+            txid: None,
+            block_height: None,
+        },
+    }))
 }
