@@ -13,3 +13,7 @@ data/
 # Demo scratch dir created by scripts/regtest-demo.sh — only here as a
 # safety net if you ever move it inside the repo.
 /tmp/hodl-regtest/
+
+# Paper drafts and LaTeX build artifacts. Only design.md is tracked.
+docs/*
+!docs/design.md
