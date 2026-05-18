@@ -1,0 +1,39 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "hodlcoin",
+  "version": "0.1.0",
+  "identifier": "com.hodlcoin.wallet",
+  "build": {
+    "frontendDist": "ui/dist",
+    "devUrl": "http://localhost:1420",
+    "beforeDevCommand": "pnpm --dir ui dev",
+    "beforeBuildCommand": "pnpm --dir ui build"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "hodlcoin",
+        "width": 1024,
+        "height": 720,
+        "minWidth": 800,
+        "minHeight": 600,
+        "resizable": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["appimage", "deb"],
+    "category": "Finance",
+    "shortDescription": "hodlcoin wallet",
+    "longDescription": "Desktop wallet for the hodlcoin POC. Manages L1 mint UTXOs (deposit), L2 transfers, sparse-verification balance queries, and CSV reclaim (withdraw).",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png"
+    ]
+  }
+}

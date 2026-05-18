@@ -5,6 +5,19 @@ members = [
     "crates/hodl-wallet",
     "crates/hodl-sequencer",
     "crates/hodl-node",
+    "crates/hodl-desktop",
+]
+# Plain `cargo check`/`cargo test`/`cargo build` only touches the
+# headless crates. The Tauri app pulls in heavier system dependencies
+# (libwebkit2gtk-4.1, libsoup-3.0, …) that aren't required for the
+# core protocol code; build it explicitly with `cargo tauri dev` /
+# `cargo tauri build`, or `cargo build -p hodl-desktop` once those
+# deps are installed. See crates/hodl-desktop/README.md.
+default-members = [
+    "crates/hodl-core",
+    "crates/hodl-wallet",
+    "crates/hodl-sequencer",
+    "crates/hodl-node",
 ]
 
 [workspace.package]

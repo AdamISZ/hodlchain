@@ -30,10 +30,14 @@ the implementation notes are in `docs/design.md`.
 |                        | bitcoind, replays L2 blocks, re-verifies every mint witness      |
 |                        | against L1. Exposes a slim Esplora-compatible HTTP subset so     |
 |                        | light wallets can walk the chain without their own bitcoind.    |
-| `crates/hodl-wallet`   | CLI wallet. Creates CSV-locked taproot mint UTXOs, submits mint  |
-|                        | messages + transfers, verifies its own balance via SMT inclusion |
-|                        | proofs, supports a light-client mode that derives state from L1  |
-|                        | via Esplora.                                                     |
+| `crates/hodl-wallet`   | CLI wallet + reusable library. `ops::*` is the typed surface     |
+|                        | every UI (CLI + desktop) calls into; `main.rs` is a thin clap    |
+|                        | shim. Handles BIP39 mnemonic, BIP32-derived per-mint L1 keys,    |
+|                        | sparse stateless light-balance verification, and L1 reclaim.     |
+| `crates/hodl-desktop`  | Tauri v2 + Svelte 5 + TypeScript desktop wallet. Thin            |
+|                        | `#[tauri::command]` wrappers around `hodl_wallet::ops::*`.       |
+|                        | Excluded from `default-members` because it needs                 |
+|                        | libwebkit2gtk-4.1; see `crates/hodl-desktop/README.md`.          |
 | `docs/`                | `design.md` is the implementation companion to the paper.        |
 |                        | `issuancev*.tex` are the working paper drafts (untracked).       |
 | `scripts/regtest-demo.sh` | End-to-end demo against a temp bitcoind on regtest.           |
@@ -41,13 +45,18 @@ the implementation notes are in `docs/design.md`.
 ## Build
 
 ```bash
-cargo build --workspace
-cargo test --workspace
+cargo build       # headless crates (hodl-core/wallet/sequencer/node)
+cargo test
 ```
 
-You need a recent Rust (edition 2021+). All daemons use tokio + axum.
-No proof-system dependencies yet — ZK validity proofs are the next big
-work item.
+You need a recent Rust (edition 2021+). The headless daemons use
+tokio + axum; no proof-system dependencies (see
+`docs/zk-design-discussion.md` for the rationale).
+
+For the Tauri desktop app, install the extra system / JS toolchain
+prerequisites (libwebkit2gtk-4.1-dev, libsoup-3.0-dev, Node 20+,
+pnpm, `cargo install tauri-cli --version "^2"`) and then build via
+`cd crates/hodl-desktop && cargo tauri dev`.
 
 ## See it run
 
@@ -127,8 +136,10 @@ If you want to follow the protocol from the bottom up:
    production, chained attestation tx construction, HTTP intake.
 8. **`crates/hodl-node/src/{follower,bitcoind,api}.rs`** — L1 chain
    walk, block replay, Esplora endpoints.
-9. **`crates/hodl-wallet/src/{main,esplora}.rs`** — CLI surface and
-   light-client chain walker.
+9. **`crates/hodl-wallet/src/{ops,verify,reclaim,wallet,esplora}.rs`** —
+   the wallet library. `ops` is the UI-agnostic typed surface;
+   `main.rs` is a thin CLI shim over it. The Tauri desktop app in
+   `crates/hodl-desktop` is a parallel consumer.
 
 Or read `docs/design.md` front-to-back for the design rationale.
 

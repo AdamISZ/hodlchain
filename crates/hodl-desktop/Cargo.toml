@@ -1,0 +1,34 @@
+[package]
+name = "hodl-desktop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# Tauri convention: a library crate exposes `run()`; main.rs is a thin
+# entrypoint. Keeps the codebase open to mobile targets later without
+# restructuring.
+[lib]
+name = "hodl_desktop_lib"
+crate-type = ["lib", "cdylib", "staticlib"]
+
+[[bin]]
+name = "hodl-desktop"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+hodl-wallet = { path = "../hodl-wallet" }
+hodl-core = { workspace = true }
+tauri = { version = "2", features = [] }
+serde = { workspace = true, features = ["std"] }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+hex = { workspace = true, features = ["std"] }
+bitcoin = { workspace = true, features = ["std"] }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+dirs = "5"

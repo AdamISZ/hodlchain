@@ -114,7 +114,9 @@ trap cleanup EXIT INT TERM
 # --- Build -----------------------------------------------------------------
 
 say "building hodlcoin binaries"
-(cd "$ROOT" && cargo build --workspace 2>&1) | tail -1
+# Note: relies on `default-members` in the workspace Cargo.toml to
+# skip hodl-desktop (which needs libwebkit2gtk-4.1-dev etc.).
+(cd "$ROOT" && cargo build 2>&1) | tail -1
 ok "binaries: $WALLET_BIN, $SEQ_BIN, $NODE_BIN"
 
 # --- bitcoind --------------------------------------------------------------
