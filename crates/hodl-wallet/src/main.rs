@@ -149,22 +149,23 @@ async fn main() -> Result<()> {
         .init();
 
     let cli = Cli::parse();
+    let wallet = &cli.wallet;
     match cli.cmd {
-        Cmd::Keygen(args) => cmd_keygen(cli.wallet, args),
-        Cmd::Address => cmd_address(&cli.wallet),
-        Cmd::MintUtxo(args) => cmd_mint_utxo(cli.wallet, args),
-        Cmd::ListMints => cmd_list_mints(&cli.wallet),
-        Cmd::MintMessage(args) => cmd_mint_message(cli.wallet, args).await,
-        Cmd::Transfer(args) => cmd_transfer(cli.wallet, args).await,
-        Cmd::Balance(args) => cmd_balance(cli.wallet, args).await,
-        Cmd::VerifyBalance(args) => cmd_verify_balance(cli.wallet, args).await,
-        Cmd::Head => cmd_head(&cli.wallet).await,
-        Cmd::LightHead => cmd_light_head(&cli.wallet).await,
-        Cmd::LightBalance(args) => cmd_light_balance(cli.wallet, args).await,
+        Cmd::Keygen(args) => cmd_keygen(wallet, args),
+        Cmd::Address => cmd_address(wallet),
+        Cmd::MintUtxo(args) => cmd_mint_utxo(wallet, args),
+        Cmd::ListMints => cmd_list_mints(wallet),
+        Cmd::MintMessage(args) => cmd_mint_message(wallet, args).await,
+        Cmd::Transfer(args) => cmd_transfer(wallet, args).await,
+        Cmd::Balance(args) => cmd_balance(wallet, args).await,
+        Cmd::VerifyBalance(args) => cmd_verify_balance(wallet, args).await,
+        Cmd::Head => cmd_head(wallet).await,
+        Cmd::LightHead => cmd_light_head(wallet).await,
+        Cmd::LightBalance(args) => cmd_light_balance(wallet, args).await,
     }
 }
 
-fn cmd_keygen(wallet_path: PathBuf, args: KeygenArgs) -> Result<()> {
+fn cmd_keygen(wallet_path: &std::path::Path, args: KeygenArgs) -> Result<()> {
     let network = network_from_str(&args.network)?;
     let auth = match (args.bitcoind_cookie, args.bitcoind_user, args.bitcoind_pass) {
         (Some(p), None, None) => BitcoindAuth::Cookie { path: p },
@@ -174,20 +175,25 @@ fn cmd_keygen(wallet_path: PathBuf, args: KeygenArgs) -> Result<()> {
         }
         _ => bail!("conflicting bitcoind auth flags"),
     };
-    let out = ops::keygen(ops::KeygenInput {
+    let out = ops::keygen(
         wallet_path,
-        network,
-        bitcoind: BitcoindConfig {
-            url: args.bitcoind_url,
-            auth,
+        ops::KeygenInput {
+            network,
+            bitcoind: BitcoindConfig {
+                url: args.bitcoind_url,
+                auth,
+            },
+            sequencer_url: args.sequencer_url,
+            node_url: args.node_url,
+            esplora_url: args.esplora_url,
+            force: args.force,
         },
-        sequencer_url: args.sequencer_url,
-        node_url: args.node_url,
-        esplora_url: args.esplora_url,
-        force: args.force,
-    })?;
-    println!("wrote {}", out.wallet_path.display());
+    )?;
+    println!("wrote {}", wallet_path.display());
     println!("L2 address: {}", hex::encode(out.l2_address.serialize()));
+    println!();
+    println!("BIP39 mnemonic (24 words) — back this up:");
+    println!("  {}", out.mnemonic);
     Ok(())
 }
 
@@ -197,12 +203,14 @@ fn cmd_address(wallet_path: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
-fn cmd_mint_utxo(wallet_path: PathBuf, args: MintUtxoArgs) -> Result<()> {
-    let out = ops::mint_utxo(ops::MintUtxoInput {
+fn cmd_mint_utxo(wallet_path: &std::path::Path, args: MintUtxoArgs) -> Result<()> {
+    let out = ops::mint_utxo(
         wallet_path,
-        lock_blocks: args.lock_blocks,
-        value_btc: args.value_btc,
-    })?;
+        ops::MintUtxoInput {
+            lock_blocks: args.lock_blocks,
+            value_btc: args.value_btc,
+        },
+    )?;
     println!("L1 tip: {}", out.l1_tip);
     println!("relative locktime T: {} blocks", out.lock_blocks);
     println!("mint address: {}", out.mint_address);
@@ -231,13 +239,15 @@ fn cmd_list_mints(wallet_path: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
-async fn cmd_mint_message(wallet_path: PathBuf, args: MintMessageArgs) -> Result<()> {
+async fn cmd_mint_message(wallet_path: &std::path::Path, args: MintMessageArgs) -> Result<()> {
     let to = args.to.map(|s| parse_xonly(&s)).transpose()?;
-    let out = ops::mint_message(ops::MintMessageInput {
+    let out = ops::mint_message(
         wallet_path,
-        outpoint: args.outpoint,
-        to,
-    })
+        ops::MintMessageInput {
+            outpoint: args.outpoint,
+            to,
+        },
+    )
     .await?;
     if out.accepted {
         println!(
@@ -250,13 +260,15 @@ async fn cmd_mint_message(wallet_path: PathBuf, args: MintMessageArgs) -> Result
     Ok(())
 }
 
-async fn cmd_transfer(wallet_path: PathBuf, args: TransferArgs) -> Result<()> {
+async fn cmd_transfer(wallet_path: &std::path::Path, args: TransferArgs) -> Result<()> {
     let to = parse_xonly(&args.to)?;
-    let out = ops::transfer(ops::TransferInput {
+    let out = ops::transfer(
         wallet_path,
-        to,
-        amount: args.amount,
-    })
+        ops::TransferInput {
+            to,
+            amount: args.amount,
+        },
+    )
     .await?;
     if out.accepted {
         println!("transfer accepted");
@@ -266,27 +278,22 @@ async fn cmd_transfer(wallet_path: PathBuf, args: TransferArgs) -> Result<()> {
     Ok(())
 }
 
-async fn cmd_balance(wallet_path: PathBuf, args: BalanceArgs) -> Result<()> {
+async fn cmd_balance(wallet_path: &std::path::Path, args: BalanceArgs) -> Result<()> {
     let addr = args.addr.map(|s| parse_xonly(&s)).transpose()?;
-    let out = ops::balance(ops::BalanceInput { wallet_path, addr }).await?;
+    let out = ops::balance(wallet_path, ops::BalanceInput { addr }).await?;
     println!("address: {}", hex::encode(out.address.serialize()));
     println!("balance: {} atoms", out.balance);
     println!("nonce:   {}", out.nonce);
     Ok(())
 }
 
-async fn cmd_verify_balance(wallet_path: PathBuf, args: VerifyBalanceArgs) -> Result<()> {
+async fn cmd_verify_balance(wallet_path: &std::path::Path, args: VerifyBalanceArgs) -> Result<()> {
     let addr = args.addr.map(|s| parse_xonly(&s)).transpose()?;
     let against = args
         .against
         .map(|s| H256::from_hex(&s).context("parse --against hex"))
         .transpose()?;
-    let out = ops::verify_balance(ops::VerifyBalanceInput {
-        wallet_path,
-        addr,
-        against,
-    })
-    .await?;
+    let out = ops::verify_balance(wallet_path, ops::VerifyBalanceInput { addr, against }).await?;
     println!("verified");
     println!("  address:     {}", hex::encode(out.address.serialize()));
     println!("  balance:     {} atoms", out.balance);
@@ -320,9 +327,9 @@ async fn cmd_light_head(wallet_path: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
-async fn cmd_light_balance(wallet_path: PathBuf, args: LightBalanceArgs) -> Result<()> {
+async fn cmd_light_balance(wallet_path: &std::path::Path, args: LightBalanceArgs) -> Result<()> {
     let addr = args.addr.map(|s| parse_xonly(&s)).transpose()?;
-    let out = ops::light_balance(ops::LightBalanceInput { wallet_path, addr }).await?;
+    let out = ops::light_balance(wallet_path, ops::LightBalanceInput { addr }).await?;
     let mode_label = match out.mode {
         LightBalanceMode::ColdStart => "cold-start",
         LightBalanceMode::WarmStart => "warm-start",

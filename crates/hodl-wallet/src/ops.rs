@@ -16,7 +16,8 @@
 //!     operation.
 
 use anyhow::{anyhow, bail, Context, Result};
-use bitcoin::secp256k1::{rand, Message, Secp256k1, XOnlyPublicKey};
+use bip39::Mnemonic;
+use bitcoin::secp256k1::{Message, Secp256k1, XOnlyPublicKey};
 use bitcoin::{Amount, OutPoint, Txid};
 use hodl_core::consensus::MAX_LOCK_BLOCKS;
 use hodl_core::hash::H256;
@@ -27,7 +28,7 @@ use hodl_core::smt::LeafKind;
 use hodl_core::state::LedgerState;
 use hodl_core::tx::{SignedTransfer, TransferBody};
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::api::ApiClient;
 use crate::bitcoind::Bitcoind;
@@ -41,7 +42,6 @@ use crate::wallet::{
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct KeygenInput {
-    pub wallet_path: PathBuf,
     pub network: NetworkName,
     pub bitcoind: BitcoindConfig,
     pub sequencer_url: String,
@@ -52,35 +52,40 @@ pub struct KeygenInput {
 
 #[derive(Clone, Debug, Serialize)]
 pub struct KeygenOutput {
-    pub wallet_path: PathBuf,
     pub l2_address: XOnlyPublicKey,
+    /// The freshly-generated BIP39 mnemonic. **Display once at setup,
+    /// invite the user to back it up.** It's also persisted to the
+    /// wallet file; this field exists so UIs can surface it without
+    /// re-reading the file.
+    pub mnemonic: String,
 }
 
-pub fn keygen(input: KeygenInput) -> Result<KeygenOutput> {
-    if input.wallet_path.exists() && !input.force {
+pub fn keygen(wallet_path: &Path, input: KeygenInput) -> Result<KeygenOutput> {
+    if wallet_path.exists() && !input.force {
         bail!(
             "wallet file {} already exists (set force=true to overwrite)",
-            input.wallet_path.display()
+            wallet_path.display()
         );
     }
     let secp = Secp256k1::new();
-    let kp = bitcoin::secp256k1::Keypair::new(&secp, &mut rand::thread_rng());
-    let sk = kp.secret_key();
-    let (xonly, _) = kp.x_only_public_key();
+    let mnemonic = Mnemonic::generate(24).context("generate BIP39 mnemonic")?;
+    let phrase = mnemonic.to_string();
     let wf = WalletFile {
         network: input.network,
-        secret_key_hex: hex::encode(sk.secret_bytes()),
+        mnemonic: phrase.clone(),
         bitcoind: input.bitcoind,
         sequencer_url: input.sequencer_url,
         node_url: input.node_url,
         esplora_url: input.esplora_url,
+        next_mint_index: 0,
         mints: Vec::new(),
         verified_head: None,
     };
-    wf.save(&input.wallet_path)?;
+    wf.save(wallet_path)?;
+    let l2_address = wf.l2_identity_xonly(&secp)?;
     Ok(KeygenOutput {
-        wallet_path: input.wallet_path,
-        l2_address: xonly,
+        l2_address,
+        mnemonic: phrase,
     })
 }
 
@@ -96,7 +101,6 @@ pub fn address(wallet_path: &Path) -> Result<XOnlyPublicKey> {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct MintUtxoInput {
-    pub wallet_path: PathBuf,
     pub lock_blocks: u32,
     pub value_btc: f64,
 }
@@ -111,30 +115,36 @@ pub struct MintUtxoOutput {
     pub value_sat: u64,
 }
 
-pub fn mint_utxo(input: MintUtxoInput) -> Result<MintUtxoOutput> {
+pub fn mint_utxo(wallet_path: &Path, input: MintUtxoInput) -> Result<MintUtxoOutput> {
     if input.lock_blocks == 0 || input.lock_blocks > MAX_LOCK_BLOCKS {
         bail!(
             "lock_blocks must be in [1, {}] (BIP112 CSV block-form range)",
             MAX_LOCK_BLOCKS
         );
     }
-    let mut wf = WalletFile::load(&input.wallet_path)?;
+    let mut wf = WalletFile::load(wallet_path)?;
     let secp = Secp256k1::new();
-    let xonly = wf.xonly_pubkey(&secp)?;
+    // Allocate a fresh BIP32-derived L1 mint key for this mint. Each
+    // mint UTXO commits to a different user_pk on chain, so an L1
+    // observer cannot group mints by the same user without
+    // additional analysis.
+    let (mint_kp, bip32_index) = wf.allocate_mint_keypair(&secp)?;
+    let mint_xonly = mint_kp.x_only_public_key().0;
     let network = wf.network.into_bitcoin();
     let bd = Bitcoind::connect(&wf.bitcoind)?;
     let l1_tip = bd.block_count()?;
-    let (spk, _spend) = derive_mint_taproot(&secp, input.lock_blocks, &xonly);
-    let address = mint_address(&secp, input.lock_blocks, &xonly, network);
+    let (spk, _spend) = derive_mint_taproot(&secp, input.lock_blocks, &mint_xonly);
+    let address = mint_address(&secp, input.lock_blocks, &mint_xonly, network);
     let amount = Amount::from_btc(input.value_btc).context("invalid BTC amount")?;
     let (txid, vout) = bd.send_to_address(&address, amount, &spk)?;
     wf.upsert_mint(MintRecord {
         outpoint: format!("{txid}:{vout}"),
         value_sat: amount.to_sat(),
         lock_blocks: input.lock_blocks,
+        bip32_index,
         minted: false,
     });
-    wf.save(&input.wallet_path)?;
+    wf.save(wallet_path)?;
     Ok(MintUtxoOutput {
         l1_tip,
         lock_blocks: input.lock_blocks,
@@ -156,7 +166,6 @@ pub fn list_mints(wallet_path: &Path) -> Result<Vec<MintRecord>> {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct MintMessageInput {
-    pub wallet_path: PathBuf,
     pub outpoint: String,
     pub to: Option<XOnlyPublicKey>,
 }
@@ -169,24 +178,27 @@ pub struct MintMessageOutput {
     pub error: Option<String>,
 }
 
-pub async fn mint_message(input: MintMessageInput) -> Result<MintMessageOutput> {
-    let mut wf = WalletFile::load(&input.wallet_path)?;
+pub async fn mint_message(wallet_path: &Path, input: MintMessageInput) -> Result<MintMessageOutput> {
+    let mut wf = WalletFile::load(wallet_path)?;
     let secp = Secp256k1::new();
-    let kp = wf.keypair(&secp)?;
-    let xonly = wf.xonly_pubkey(&secp)?;
+    let l2_identity = wf.l2_identity_xonly(&secp)?;
     let record = wf
         .find_mint(&input.outpoint)
         .ok_or_else(|| anyhow!("no recorded mint for {}", input.outpoint))?
         .clone();
     let outpoint: OutPoint = parse_outpoint(&record.outpoint)?;
-    let l2_destination = input.to.unwrap_or(xonly);
+    let l2_destination = input.to.unwrap_or(l2_identity);
 
+    // Sign the mint message with the L1 mint key that the mint UTXO
+    // commits to (via `user_pk` in L_spend).
+    let mint_kp = wf.mint_keypair(&secp, record.bip32_index)?;
+    let mint_xonly = mint_kp.x_only_public_key().0;
     let sighash = OutpointProof::sighash(&outpoint, &l2_destination);
     let msg = Message::from_digest(sighash);
-    let signature = secp.sign_schnorr(&msg, &kp);
+    let signature = secp.sign_schnorr(&msg, &mint_kp);
     let proof = OutpointProof {
         outpoint,
-        user_xonly_pubkey: xonly,
+        user_xonly_pubkey: mint_xonly,
         lock_blocks: record.lock_blocks,
         signature,
     };
@@ -199,7 +211,7 @@ pub async fn mint_message(input: MintMessageInput) -> Result<MintMessageOutput> 
         if let Some(r) = wf.find_mint_mut(&input.outpoint) {
             r.minted = true;
         }
-        wf.save(&input.wallet_path)?;
+        wf.save(wallet_path)?;
     }
     Ok(MintMessageOutput {
         accepted: resp.accepted,
@@ -213,7 +225,6 @@ pub async fn mint_message(input: MintMessageInput) -> Result<MintMessageOutput> 
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct TransferInput {
-    pub wallet_path: PathBuf,
     pub to: XOnlyPublicKey,
     pub amount: u64,
 }
@@ -224,11 +235,11 @@ pub struct TransferOutput {
     pub error: Option<String>,
 }
 
-pub async fn transfer(input: TransferInput) -> Result<TransferOutput> {
-    let wf = WalletFile::load(&input.wallet_path)?;
+pub async fn transfer(wallet_path: &Path, input: TransferInput) -> Result<TransferOutput> {
+    let wf = WalletFile::load(wallet_path)?;
     let secp = Secp256k1::new();
-    let kp = wf.keypair(&secp)?;
-    let from = wf.xonly_pubkey(&secp)?;
+    let kp = wf.l2_identity_keypair(&secp)?;
+    let from = wf.l2_identity_xonly(&secp)?;
     let api = ApiClient::new(wf.sequencer_url.clone(), wf.node_url.clone());
     let bal = api.balance(&from).await?;
     let body = TransferBody {
@@ -251,7 +262,6 @@ pub async fn transfer(input: TransferInput) -> Result<TransferOutput> {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct BalanceInput {
-    pub wallet_path: PathBuf,
     pub addr: Option<XOnlyPublicKey>,
 }
 
@@ -262,8 +272,8 @@ pub struct BalanceOutput {
     pub nonce: u64,
 }
 
-pub async fn balance(input: BalanceInput) -> Result<BalanceOutput> {
-    let wf = WalletFile::load(&input.wallet_path)?;
+pub async fn balance(wallet_path: &Path, input: BalanceInput) -> Result<BalanceOutput> {
+    let wf = WalletFile::load(wallet_path)?;
     let secp = Secp256k1::new();
     let target = match input.addr {
         Some(a) => a,
@@ -282,7 +292,6 @@ pub async fn balance(input: BalanceInput) -> Result<BalanceOutput> {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct VerifyBalanceInput {
-    pub wallet_path: PathBuf,
     pub addr: Option<XOnlyPublicKey>,
     /// Optional externally-supplied state_root to compare against
     /// (e.g. one walked off L1). When supplied, the verification also
@@ -300,8 +309,8 @@ pub struct VerifyBalanceOutput {
     pub bound_to_l1: bool,
 }
 
-pub async fn verify_balance(input: VerifyBalanceInput) -> Result<VerifyBalanceOutput> {
-    let wf = WalletFile::load(&input.wallet_path)?;
+pub async fn verify_balance(wallet_path: &Path, input: VerifyBalanceInput) -> Result<VerifyBalanceOutput> {
+    let wf = WalletFile::load(wallet_path)?;
     let secp = Secp256k1::new();
     let target = match input.addr {
         Some(a) => a,
@@ -436,7 +445,6 @@ pub async fn light_head(wallet_path: &Path) -> Result<LightHeadOutput> {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct LightBalanceInput {
-    pub wallet_path: PathBuf,
     pub addr: Option<XOnlyPublicKey>,
 }
 
@@ -467,8 +475,8 @@ pub struct LightBalanceOutput {
     pub is_own_address: bool,
 }
 
-pub async fn light_balance(input: LightBalanceInput) -> Result<LightBalanceOutput> {
-    let mut wf = WalletFile::load(&input.wallet_path)?;
+pub async fn light_balance(wallet_path: &Path, input: LightBalanceInput) -> Result<LightBalanceOutput> {
+    let mut wf = WalletFile::load(wallet_path)?;
     let secp = Secp256k1::new();
     let own_addr = wf.xonly_pubkey(&secp)?;
     let target = input.addr.unwrap_or(own_addr);
@@ -545,6 +553,6 @@ pub async fn light_balance(input: LightBalanceInput) -> Result<LightBalanceOutpu
 
     // Persist the (possibly-advanced) verified head before returning.
     wf.verified_head = Some(head);
-    wf.save(&input.wallet_path)?;
+    wf.save(wallet_path)?;
     Ok(output)
 }

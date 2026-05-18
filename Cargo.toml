@@ -21,6 +21,10 @@ hodl-core = { path = "crates/hodl-core" }
 bitcoin = { version = "0.32", default-features = false, features = ["serde"] }
 bitcoincore-rpc = "0.19"
 secp256k1 = { version = "0.29", default-features = false, features = ["serde", "alloc"] }
+# BIP39 mnemonic generation/parsing for the wallet. The bitcoin crate
+# already provides BIP32 (`bitcoin::bip32::Xpriv`). The `rand` feature
+# unlocks `Mnemonic::generate(words)`.
+bip39 = { version = "2", features = ["rand"] }
 
 # Async / HTTP
 tokio = { version = "1", features = ["full"] }

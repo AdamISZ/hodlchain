@@ -32,6 +32,16 @@ impl NetworkName {
             _ => return None,
         })
     }
+
+    /// SLIP-44 coin type. Mainnet is 0; everything else is 1 (the
+    /// "Testnet (all coins)" entry). Used as the `coin_type'` level
+    /// in BIP44-shaped derivation paths.
+    pub fn slip44_coin_type(self) -> u32 {
+        match self {
+            NetworkName::Bitcoin => 0,
+            NetworkName::Testnet | NetworkName::Signet | NetworkName::Regtest => 1,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

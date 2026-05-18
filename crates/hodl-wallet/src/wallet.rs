@@ -2,9 +2,41 @@
 //!
 //! Default path: `./hodl-wallet.json`. Overrideable with `--wallet`.
 //! Atomic save: write to `<path>.tmp`, then rename.
+//!
+//! ## Key model
+//!
+//! The wallet stores a **BIP39 24-word mnemonic**. All operational
+//! keys are derived from it via BIP32 under hodlcoin-specific BIP44
+//! paths:
+//!
+//! ```text
+//! m / HODL' / coin_type' / account' / 0 / index
+//! ```
+//!
+//! where:
+//! - `HODL' = 1213154380'` (= 0x484F444C) — the ASCII bytes
+//!   `'H' 'O' 'D' 'L'` interpreted as a big-endian u32, then
+//!   hardened. Hodlcoin-specific purpose word, deliberately distinct
+//!   from BIP86 (which is reserved for plain P2TR receive keys; our
+//!   L1 keys go into a custom CSV-locked script and never appear as
+//!   P2TR receive addresses).
+//! - `coin_type'` — SLIP-44: 0' on mainnet, 1' on testnet/signet/regtest.
+//! - `account'` — 0' for L1 mint keys (a stream of one-shot keys, one
+//!   per mint UTXO), 1' for the L2 identity (a single stable key
+//!   serving as the L2 receive address + transfer signing key).
+//! - `index` — for L1 mint keys, equals the per-wallet
+//!   `next_mint_index` counter at the time the mint UTXO was created
+//!   (stored in `MintRecord.bip32_index`). For the L2 identity, always 0.
+//!
+//! ## Wallet format note
+//!
+//! This is a hard break from any earlier `secret_key_hex` format.
+//! Old wallet files cannot be loaded; regenerate with `keygen`.
 
 use anyhow::{anyhow, Context, Result};
-use bitcoin::secp256k1::{Keypair, Secp256k1, SecretKey, XOnlyPublicKey};
+use bip39::Mnemonic;
+use bitcoin::bip32::{DerivationPath, Xpriv};
+use bitcoin::secp256k1::{Keypair, Secp256k1, XOnlyPublicKey};
 use bitcoin::OutPoint;
 use hodl_core::hash::H256;
 use hodl_core::smt::LeafKind;
@@ -12,15 +44,22 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
+use std::str::FromStr;
 
 pub use hodl_core::config::{BitcoindAuth, BitcoindConfig, NetworkName};
 
 pub const DEFAULT_WALLET_PATH: &str = "./hodl-wallet.json";
 
+/// Hodlcoin BIP44 purpose word: ASCII bytes `'H','O','D','L'` as a
+/// big-endian u32 (= 0x484F444C = 1_213_154_380). Hardened in
+/// derivation paths via the `'` suffix in the string form.
+pub const HODLCOIN_PURPOSE: u32 = 0x484F444C;
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WalletFile {
     pub network: NetworkName,
-    pub secret_key_hex: String,
+    /// BIP39 mnemonic (24 words by default).
+    pub mnemonic: String,
     pub bitcoind: BitcoindConfig,
     pub sequencer_url: String,
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -31,56 +70,16 @@ pub struct WalletFile {
     /// this at `hodl-node` which exposes the same shape.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub esplora_url: Option<String>,
+    /// Next derivation index for L1 mint keys. Incremented by every
+    /// successful `mint-utxo`. Lookup of any past mint's key goes via
+    /// `MintRecord.bip32_index`, so the counter is just for monotonic
+    /// allocation.
+    #[serde(default)]
+    pub next_mint_index: u32,
     #[serde(default)]
     pub mints: Vec<MintRecord>,
-    /// State the light-balance command has already verified. When
-    /// present, the next `light-balance` invocation only verifies new
-    /// blocks since `verified_head.l2_height`; without it, the wallet
-    /// cold-starts (option 1 in the design discussion: trust the L1
-    /// attestation chain + validator network for a one-time
-    /// inclusion-proof bootstrap, then run sparse verification
-    /// forwards from there).
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub verified_head: Option<VerifiedHead>,
-}
-
-/// Persistent state of the wallet's incremental light-balance
-/// verification. Captured after each successful light-balance run.
-///
-/// The wallet only carries *its own* leaf and SMT path — full state
-/// stays at the sequencer/node. Per new block, the wallet uses the
-/// block witness to recompute the post-block accounts_root sparsely.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct VerifiedHead {
-    /// Full state_root at this head. Display + L1-attestation
-    /// cross-check.
-    pub state_root: H256,
-    /// SMT accounts_root at this head. The component pre-state proofs
-    /// in the next block's witness verify against.
-    pub accounts_root: H256,
-    pub l2_height: u32,
-    pub block_hash: H256,
-    pub l1_height: u32,
-    /// The anchor outpoint that the *next* attestation tx will spend.
-    /// For an L2 head at height H, this is the change output (vout=1)
-    /// of the attestation tx for block H.
-    pub anchor_outpoint: OutPoint,
-    /// L2 address this head tracks (the wallet's own pubkey at the
-    /// time of last `light-balance`). Sanity-checked on load against
-    /// the wallet's current key — a mismatch means the keypair changed.
-    pub own_address: XOnlyPublicKey,
-    pub own_leaf: LeafKind,
-    /// SMT siblings for `own_address` at `accounts_root`,
-    /// leaf-to-root, length 256.
-    pub own_path: Vec<H256>,
-    /// Cumulative consumed-nullifier set, mirroring the node's
-    /// LedgerState.consumed_nullifiers. Needed to recompute
-    /// `nullifiers_hash` after each block.
-    pub consumed_nullifiers: BTreeSet<String>,
-    /// Retargeting state needed to recompute the post-block state_root.
-    pub current_r: f64,
-    pub current_window_atoms: u64,
-    pub current_window_start_height: u32,
 }
 
 pub fn network_from_str(s: &str) -> Result<NetworkName> {
@@ -88,8 +87,8 @@ pub fn network_from_str(s: &str) -> Result<NetworkName> {
 }
 
 /// One CSV-locked mint UTXO we created via this wallet. Persisted so a
-/// later `mint-message` can find the proof inputs without re-querying the
-/// chain for everything.
+/// later `mint-message` (and later still, `reclaim`) can find the proof
+/// inputs without re-querying the chain for everything.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MintRecord {
     /// "<txid>:<vout>"
@@ -97,6 +96,9 @@ pub struct MintRecord {
     pub value_sat: u64,
     /// Relative locktime baked into L_spend's CSV, in blocks.
     pub lock_blocks: u32,
+    /// BIP32 derivation index of the L1 mint key under this mint's
+    /// UTXO script. Needed for the eventual CSV reclaim signature.
+    pub bip32_index: u32,
     /// True once we have submitted a mint message that the sequencer
     /// accepted. Local hint; the sequencer's consumed-nullifier set is
     /// authoritative.
@@ -128,23 +130,101 @@ impl WalletFile {
         Ok(())
     }
 
-    pub fn secret_key(&self) -> Result<SecretKey> {
-        let bytes = hex::decode(&self.secret_key_hex).context("decode secret_key_hex")?;
-        Ok(SecretKey::from_slice(&bytes).context("parse secret_key")?)
+    /// Parsed BIP39 mnemonic.
+    fn mnemonic_parsed(&self) -> Result<Mnemonic> {
+        Mnemonic::from_str(self.mnemonic.trim()).context("parse wallet mnemonic")
     }
 
-    pub fn keypair<C: bitcoin::secp256k1::Signing>(
+    /// BIP39 seed bytes (PBKDF2 over the mnemonic + optional passphrase).
+    /// We do not currently support passphrases; the empty string is
+    /// the standard "no passphrase" input.
+    pub fn seed(&self) -> Result<[u8; 64]> {
+        Ok(self.mnemonic_parsed()?.to_seed(""))
+    }
+
+    /// BIP32 master extended private key derived from the seed.
+    pub fn master_xpriv(&self) -> Result<Xpriv> {
+        let seed = self.seed()?;
+        Xpriv::new_master(self.network.into_bitcoin(), &seed).context("derive master xpriv")
+    }
+
+    /// Derivation path for an L1 mint key at the given index.
+    /// `m / HODL' / coin_type' / 0' / 0 / index`
+    pub fn mint_key_path(&self, index: u32) -> Result<DerivationPath> {
+        let coin = self.network.slip44_coin_type();
+        DerivationPath::from_str(&format!(
+            "m/{}'/{}'/0'/0/{}",
+            HODLCOIN_PURPOSE, coin, index
+        ))
+        .context("build mint-key derivation path")
+    }
+
+    /// Derivation path for the L2 identity key.
+    /// `m / HODL' / coin_type' / 1' / 0 / 0`
+    pub fn l2_identity_path(&self) -> Result<DerivationPath> {
+        let coin = self.network.slip44_coin_type();
+        DerivationPath::from_str(&format!("m/{}'/{}'/1'/0/0", HODLCOIN_PURPOSE, coin))
+            .context("build L2-identity derivation path")
+    }
+
+    /// L1 mint keypair at a specific index. Caller is responsible for
+    /// supplying the right index (from `MintRecord.bip32_index`).
+    pub fn mint_keypair<C: bitcoin::secp256k1::Signing>(
+        &self,
+        secp: &Secp256k1<C>,
+        index: u32,
+    ) -> Result<Keypair> {
+        let master = self.master_xpriv()?;
+        let path = self.mint_key_path(index)?;
+        let derived = master.derive_priv(secp, &path).context("derive mint key")?;
+        Ok(Keypair::from_secret_key(secp, &derived.private_key))
+    }
+
+    /// Stable L2 identity keypair. Same path on every call.
+    pub fn l2_identity_keypair<C: bitcoin::secp256k1::Signing>(
         &self,
         secp: &Secp256k1<C>,
     ) -> Result<Keypair> {
-        Ok(Keypair::from_secret_key(secp, &self.secret_key()?))
+        let master = self.master_xpriv()?;
+        let path = self.l2_identity_path()?;
+        let derived = master.derive_priv(secp, &path).context("derive L2 identity key")?;
+        Ok(Keypair::from_secret_key(secp, &derived.private_key))
     }
 
+    /// Allocate the next L1 mint index and return the corresponding
+    /// keypair. Does *not* save the wallet — the caller is expected to
+    /// persist alongside whatever side-effects (mint record creation
+    /// etc.) the operation produces.
+    pub fn allocate_mint_keypair<C: bitcoin::secp256k1::Signing>(
+        &mut self,
+        secp: &Secp256k1<C>,
+    ) -> Result<(Keypair, u32)> {
+        let index = self.next_mint_index;
+        let kp = self.mint_keypair(secp, index)?;
+        self.next_mint_index = self
+            .next_mint_index
+            .checked_add(1)
+            .ok_or_else(|| anyhow!("next_mint_index overflow"))?;
+        Ok((kp, index))
+    }
+
+    /// Convenience: the L2 identity x-only pubkey. This is the L2
+    /// address shown to other users, the destination of mint
+    /// messages, and the signer of transfers.
     pub fn xonly_pubkey<C: bitcoin::secp256k1::Signing>(
         &self,
         secp: &Secp256k1<C>,
     ) -> Result<XOnlyPublicKey> {
-        Ok(self.keypair(secp)?.x_only_public_key().0)
+        Ok(self.l2_identity_keypair(secp)?.x_only_public_key().0)
+    }
+
+    /// Alias for `xonly_pubkey` — clearer at call sites that handle
+    /// the L2 identity specifically.
+    pub fn l2_identity_xonly<C: bitcoin::secp256k1::Signing>(
+        &self,
+        secp: &Secp256k1<C>,
+    ) -> Result<XOnlyPublicKey> {
+        self.xonly_pubkey(secp)
     }
 
     pub fn upsert_mint(&mut self, record: MintRecord) {
@@ -164,6 +244,29 @@ impl WalletFile {
     }
 }
 
+/// Persistent state of the wallet's incremental light-balance
+/// verification. Captured after each successful light-balance run.
+///
+/// The wallet only carries *its own* leaf and SMT path — full state
+/// stays at the sequencer/node. Per new block, the wallet uses the
+/// block witness to recompute the post-block accounts_root sparsely.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct VerifiedHead {
+    pub state_root: H256,
+    pub accounts_root: H256,
+    pub l2_height: u32,
+    pub block_hash: H256,
+    pub l1_height: u32,
+    pub anchor_outpoint: OutPoint,
+    pub own_address: XOnlyPublicKey,
+    pub own_leaf: LeafKind,
+    pub own_path: Vec<H256>,
+    pub consumed_nullifiers: BTreeSet<String>,
+    pub current_r: f64,
+    pub current_window_atoms: u64,
+    pub current_window_start_height: u32,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -181,7 +284,89 @@ mod tests {
     fn outpoint_parses() {
         let op = parse_outpoint(
             "0000000000000000000000000000000000000000000000000000000000000000:7",
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(op.vout, 7);
+    }
+
+    #[test]
+    fn hodl_purpose_constant() {
+        // ASCII 'H','O','D','L' as big-endian u32 = 0x484F444C = 1_213_154_380.
+        assert_eq!(HODLCOIN_PURPOSE, u32::from_be_bytes(*b"HODL"));
+        assert_eq!(HODLCOIN_PURPOSE, 0x484F444C);
+        assert_eq!(HODLCOIN_PURPOSE, 1_213_154_380);
+    }
+
+    fn make_test_wallet(network: NetworkName) -> WalletFile {
+        let mn = Mnemonic::generate(24).unwrap().to_string();
+        WalletFile {
+            network,
+            mnemonic: mn,
+            bitcoind: BitcoindConfig {
+                url: "http://localhost:0".into(),
+                auth: BitcoindAuth::UserPass {
+                    user: "x".into(),
+                    password: "x".into(),
+                },
+            },
+            sequencer_url: "http://localhost:0".into(),
+            node_url: None,
+            esplora_url: None,
+            next_mint_index: 0,
+            mints: vec![],
+            verified_head: None,
+        }
+    }
+
+    #[test]
+    fn l2_identity_key_is_stable() {
+        let wf = make_test_wallet(NetworkName::Regtest);
+        let secp = Secp256k1::new();
+        let a = wf.l2_identity_xonly(&secp).unwrap();
+        let b = wf.l2_identity_xonly(&secp).unwrap();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn mint_keys_differ_per_index() {
+        let wf = make_test_wallet(NetworkName::Regtest);
+        let secp = Secp256k1::new();
+        let k0 = wf.mint_keypair(&secp, 0).unwrap().x_only_public_key().0;
+        let k1 = wf.mint_keypair(&secp, 1).unwrap().x_only_public_key().0;
+        let k2 = wf.mint_keypair(&secp, 2).unwrap().x_only_public_key().0;
+        assert_ne!(k0, k1);
+        assert_ne!(k1, k2);
+        assert_ne!(k0, k2);
+    }
+
+    #[test]
+    fn mint_keys_differ_from_l2_identity() {
+        let wf = make_test_wallet(NetworkName::Regtest);
+        let secp = Secp256k1::new();
+        let l2 = wf.l2_identity_xonly(&secp).unwrap();
+        let m0 = wf.mint_keypair(&secp, 0).unwrap().x_only_public_key().0;
+        assert_ne!(l2, m0);
+    }
+
+    #[test]
+    fn allocate_mint_increments_counter() {
+        let mut wf = make_test_wallet(NetworkName::Regtest);
+        let secp = Secp256k1::new();
+        assert_eq!(wf.next_mint_index, 0);
+        let (_, i) = wf.allocate_mint_keypair(&secp).unwrap();
+        assert_eq!(i, 0);
+        assert_eq!(wf.next_mint_index, 1);
+        let (_, j) = wf.allocate_mint_keypair(&secp).unwrap();
+        assert_eq!(j, 1);
+        assert_eq!(wf.next_mint_index, 2);
+    }
+
+    #[test]
+    fn allocate_then_recall_match() {
+        let mut wf = make_test_wallet(NetworkName::Regtest);
+        let secp = Secp256k1::new();
+        let (kp, idx) = wf.allocate_mint_keypair(&secp).unwrap();
+        let again = wf.mint_keypair(&secp, idx).unwrap();
+        assert_eq!(kp.secret_key(), again.secret_key());
     }
 }
