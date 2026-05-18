@@ -29,5 +29,6 @@ pub mod schemas;
 pub mod smt;
 pub mod state;
 pub mod tx;
+pub mod witness;
 
 pub use hash::H256;

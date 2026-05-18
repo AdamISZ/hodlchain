@@ -6,7 +6,10 @@
 use anyhow::{anyhow, Context, Result};
 use bitcoin::secp256k1::{Keypair, Secp256k1, SecretKey, XOnlyPublicKey};
 use bitcoin::OutPoint;
+use hodl_core::hash::H256;
+use hodl_core::smt::LeafKind;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
 
@@ -30,6 +33,54 @@ pub struct WalletFile {
     pub esplora_url: Option<String>,
     #[serde(default)]
     pub mints: Vec<MintRecord>,
+    /// State the light-balance command has already verified. When
+    /// present, the next `light-balance` invocation only verifies new
+    /// blocks since `verified_head.l2_height`; without it, the wallet
+    /// cold-starts (option 1 in the design discussion: trust the L1
+    /// attestation chain + validator network for a one-time
+    /// inclusion-proof bootstrap, then run sparse verification
+    /// forwards from there).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub verified_head: Option<VerifiedHead>,
+}
+
+/// Persistent state of the wallet's incremental light-balance
+/// verification. Captured after each successful light-balance run.
+///
+/// The wallet only carries *its own* leaf and SMT path — full state
+/// stays at the sequencer/node. Per new block, the wallet uses the
+/// block witness to recompute the post-block accounts_root sparsely.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct VerifiedHead {
+    /// Full state_root at this head. Display + L1-attestation
+    /// cross-check.
+    pub state_root: H256,
+    /// SMT accounts_root at this head. The component pre-state proofs
+    /// in the next block's witness verify against.
+    pub accounts_root: H256,
+    pub l2_height: u32,
+    pub block_hash: H256,
+    pub l1_height: u32,
+    /// The anchor outpoint that the *next* attestation tx will spend.
+    /// For an L2 head at height H, this is the change output (vout=1)
+    /// of the attestation tx for block H.
+    pub anchor_outpoint: OutPoint,
+    /// L2 address this head tracks (the wallet's own pubkey at the
+    /// time of last `light-balance`). Sanity-checked on load against
+    /// the wallet's current key — a mismatch means the keypair changed.
+    pub own_address: XOnlyPublicKey,
+    pub own_leaf: LeafKind,
+    /// SMT siblings for `own_address` at `accounts_root`,
+    /// leaf-to-root, length 256.
+    pub own_path: Vec<H256>,
+    /// Cumulative consumed-nullifier set, mirroring the node's
+    /// LedgerState.consumed_nullifiers. Needed to recompute
+    /// `nullifiers_hash` after each block.
+    pub consumed_nullifiers: BTreeSet<String>,
+    /// Retargeting state needed to recompute the post-block state_root.
+    pub current_r: f64,
+    pub current_window_atoms: u64,
+    pub current_window_start_height: u32,
 }
 
 pub fn network_from_str(s: &str) -> Result<NetworkName> {

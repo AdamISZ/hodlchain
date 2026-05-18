@@ -41,6 +41,7 @@ pub fn router(state: AppState) -> Router {
         .route("/head", get(get_head))
         .route("/balance/:addr", get(get_balance))
         .route("/block/:height", get(get_block))
+        .route("/witness/:height", get(get_witness))
         .with_state(state)
         .merge(SwaggerUi::new("/docs").url("/openapi.json", ApiDoc::openapi()))
 }
@@ -57,7 +58,7 @@ pub fn router(state: AppState) -> Router {
                        as a chain of OP_RETURN transactions.",
         version = "0.1.0",
     ),
-    paths(submit_mint, submit_transfer, get_head, get_balance, get_block),
+    paths(submit_mint, submit_transfer, get_head, get_balance, get_block, get_witness),
     components(schemas(
         // hodl-core::rpc
         hodl_core::rpc::SubmitMintRequest,
@@ -84,6 +85,8 @@ pub fn router(state: AppState) -> Router {
         // hodl-core::smt
         hodl_core::smt::InclusionProof,
         hodl_core::smt::LeafKind,
+        // hodl-core::witness
+        hodl_core::witness::BlockWitness,
         // hodl-core::hash
         hodl_core::hash::H256,
         // doc-only stubs for external types
@@ -299,6 +302,28 @@ async fn get_block(
     match block {
         Some(b) => Ok(Json(b).into_response()),
         None => Ok((StatusCode::NOT_FOUND, "no such block").into_response()),
+    }
+}
+
+#[utoipa::path(
+    get,
+    path = "/witness/{height}",
+    params(
+        ("height" = u32, Path, description = "L2 block height (>= 1; genesis has no witness)"),
+    ),
+    responses(
+        (status = 200, description = "Pre-state inclusion proofs for every account touched by the block at that height", body = hodl_core::witness::BlockWitness),
+        (status = 404, description = "No witness stored at that height"),
+    ),
+)]
+async fn get_witness(
+    State(app): State<AppState>,
+    Path(height): Path<u32>,
+) -> Result<Response, ApiError> {
+    let store = app.store.lock().unwrap();
+    match store.get_witness(height)? {
+        Some(w) => Ok(Json(w).into_response()),
+        None => Ok((StatusCode::NOT_FOUND, "no witness at that height").into_response()),
     }
 }
 

@@ -9,6 +9,7 @@ use anyhow::{Context, Result};
 use bitcoin::{OutPoint, Txid};
 use hodl_core::block::L2Block;
 use hodl_core::state::LedgerState;
+use hodl_core::witness::BlockWitness;
 use rusqlite::{params, Connection, OptionalExtension};
 use std::path::Path;
 use std::str::FromStr;
@@ -25,6 +26,10 @@ CREATE TABLE IF NOT EXISTS blocks (
 );
 CREATE TABLE IF NOT EXISTS state_snapshots (
     l2_height INTEGER PRIMARY KEY,
+    json TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS block_witnesses (
+    height INTEGER PRIMARY KEY,
     json TEXT NOT NULL
 );
 "#;
@@ -89,9 +94,11 @@ impl Store {
         &mut self,
         block: &L2Block,
         state: &LedgerState,
+        witness: &BlockWitness,
     ) -> Result<()> {
         let block_json = serde_json::to_string(block)?;
         let state_json = serde_json::to_string(state)?;
+        let witness_json = serde_json::to_string(witness)?;
         let tx = self.conn.transaction()?;
         tx.execute(
             "INSERT INTO blocks(height, json) VALUES(?1, ?2)",
@@ -102,12 +109,31 @@ impl Store {
             params![block.header.height, state_json],
         )?;
         tx.execute(
+            "INSERT INTO block_witnesses(height, json) VALUES(?1, ?2)",
+            params![block.header.height, witness_json],
+        )?;
+        tx.execute(
             "INSERT INTO kv(key, value) VALUES('l2_head_height', ?1) \
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             params![block.header.height.to_string()],
         )?;
         tx.commit()?;
         Ok(())
+    }
+
+    pub fn get_witness(&self, height: u32) -> Result<Option<BlockWitness>> {
+        let row: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT json FROM block_witnesses WHERE height = ?1",
+                params![height],
+                |r| r.get(0),
+            )
+            .optional()?;
+        match row {
+            Some(s) => Ok(Some(serde_json::from_str(&s)?)),
+            None => Ok(None),
+        }
     }
 
     pub fn set_attested_txid(&self, height: u32, txid: &Txid) -> Result<()> {

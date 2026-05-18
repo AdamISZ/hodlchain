@@ -189,12 +189,7 @@ impl LedgerState {
     /// inclusion proofs needed for v0 (nullifier set is used to prevent
     /// double-mint at apply time; users don't query it).
     pub fn nullifiers_hash(&self) -> H256 {
-        let mut h = Sha256::new();
-        h.update(b"hodl-nullifiers-v0");
-        for n in &self.consumed_nullifiers {
-            h.update(n.as_bytes());
-        }
-        H256(h.finalize().into())
+        nullifiers_hash_of(&self.consumed_nullifiers)
     }
 
     /// Snapshot the inputs to `state_root`. A light client given a
@@ -217,6 +212,18 @@ impl LedgerState {
     pub fn state_root(&self) -> H256 {
         self.components().state_root()
     }
+}
+
+/// Hash a sorted consumed-nullifier set. Exposed so the light wallet
+/// can compute it without depending on sha2 directly. Must stay in
+/// sync with `LedgerState::nullifiers_hash`.
+pub fn nullifiers_hash_of(set: &BTreeSet<String>) -> H256 {
+    let mut h = Sha256::new();
+    h.update(b"hodl-nullifiers-v0");
+    for n in set {
+        h.update(n.as_bytes());
+    }
+    H256(h.finalize().into())
 }
 
 /// The inputs that `state_root` hashes together. Producer / node /

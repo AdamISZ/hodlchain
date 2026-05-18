@@ -74,10 +74,12 @@ What it does (~15 seconds):
      state-components, verifies the SMT inclusion proof, checks the
      leaf matches the reported balance/nonce.
    - **`light-balance`** — walks the L1 attestation chain via the
-     node's Esplora-compatible endpoints to derive `state_root`
-     independently, then verifies the inclusion proof against *that*
-     root. End-to-end light-client verification with no bitcoind RPC
-     from the wallet.
+     node's Esplora-compatible endpoints, then *replays every L2
+     block from genesis*: re-verifies every transfer signature, every
+     mint witness (against L1 via Esplora), and recomputes the
+     state_root at every height. The reported balance is read out of
+     the locally-rebuilt `LedgerState`. End-to-end light-client
+     verification with no bitcoind RPC from the wallet.
 
 To leave the daemons running so you can browse the API docs:
 
@@ -132,41 +134,41 @@ Or read `docs/design.md` front-to-back for the design rationale.
 
 ## Trust posture (today)
 
-What state-light clients verify cryptographically:
+What `light-balance` verifies cryptographically (the direct-verify
+path):
 
 - The L1 chain of OP_RETURN attestations from a known `anchor_0`
   outpoint (via any Esplora — mempool.space, electrs, or our own
   hodl-node serving the same wire shape).
-- The SMT inclusion proof of their own account against the
-  `state_root` derived from L1.
+- Every L2 block body referenced by an attestation: header agreement
+  with the L1 attestation, txs_root, chain continuity, every transfer
+  signature, every mint witness against L1, and a recomputed
+  `state_root` matching the header at every height. The balance is
+  read out of the locally-rebuilt `LedgerState`.
 
-What's still trusted (deferred to later work):
+What's still trusted:
 
-- That the published `state_root` is the *correct* output of valid
-  L2 state transitions (i.e. that signatures verified, balances were
-  spent correctly, retargeting was computed correctly). Today this
-  relies on the honest-majority assumption among `hodl-node`-class
-  full validators. The next step (see roadmap) replaces this with the
-  light client verifying L2 blocks directly.
-- That mint witnesses themselves actually authorise the L2 token
-  issuance. Full nodes verify this against L1; light clients trust
-  them. Closed by an anonymous mint variant (aut-ct ring proofs) or
-  by an extended ZK proof that includes Bitcoin SPV.
-- Block-body availability — currently served by the sequencer's HTTP.
+- Block-body availability — currently served by the sequencer (or a
+  follower node) over HTTP. Without a body we cannot replay.
+- The chosen Esplora endpoint for L1 honesty. The wallet does not do
+  Bitcoin SPV / merkle-path verification of the attestation tx; the
+  endpoint is implicitly trusted not to lie about which txs exist or
+  what they contain. A locally-run electrs eliminates this.
 - Sequencer liveness — single sequencer; no rotation, no fallback.
+- For *mint anonymity*, full nodes also see which L1 UTXO funded a
+  given mint. Future work: anonymous mint via aut-ct ring proofs.
 
 ## Roadmap (rough)
 
 Working through:
 
-1. **README + housekeeping** ✓ (this file).
-2. **Direct block verification in the light client** (next). The
-   light wallet downloads recent L2 block bodies and verifies every
-   signature + state transition itself, eliminating the
-   honest-validator-majority trust assumption at POC scale. See
-   `docs/zk-design-discussion.md` for the design-space survey that
-   led to picking this over ZK validity proofs.
-3. **End-to-end desktop client**. A polished `egui` app
+1. **README + housekeeping** ✓.
+2. **Direct block verification in the light client** ✓. The
+   `light-balance` command replays every L2 block from genesis,
+   verifying each signature + mint witness + state-root continuity
+   itself. See `docs/zk-design-discussion.md` for the design-space
+   survey that led to picking this over ZK validity proofs.
+3. **End-to-end desktop client** (next). A polished `egui` app
    bundling the L1 mint flow and the L2 state-light-validating
    wallet — the demo target for non-developer users.
 

@@ -25,13 +25,13 @@ Three trust models a light client can choose between:
 
 | Model                                    | What the client verifies                                                                       | What it trusts                                                |
 |------------------------------------------|------------------------------------------------------------------------------------------------|---------------------------------------------------------------|
-| **Inclusion-proof only** (today's POC)   | L1 attestation chain → state_root committed on L1; own balance via SMT inclusion proof.        | Honest-majority of full validators (`hodl-node`-class) to ensure state_root reflects valid txs. |
-| **Direct block verification** (proposed) | All of the above, *plus* downloads recent block bodies and verifies every signature itself.    | Nothing about state transitions; client is its own validator.  |
+| **Inclusion-proof only**                 | L1 attestation chain → state_root committed on L1; own balance via SMT inclusion proof.        | Honest-majority of full validators (`hodl-node`-class) to ensure state_root reflects valid txs. |
+| **Direct block verification** (today)    | All of the above, *plus* downloads every block body and verifies every signature itself.       | Nothing about state transitions; client is its own validator.  |
 | **ZK validity proof**                    | All of the above, *plus* verifies a small ZK proof per block.                                  | The trusted setup of the proof system (a one-time concern).    |
 
-Today's `verify-balance` and `light-balance` do the inclusion-proof
-flow. The "direct block verification" path is the next concrete step
-the project will take — see the conclusion at the bottom.
+Today's `verify-balance` is the inclusion-proof-only path (kept for
+debugging / dev). `light-balance` is the direct block verification
+path — see the conclusion at the bottom. The ZK path is deferred.
 
 ## What 100 tx/s implies
 
@@ -208,27 +208,28 @@ modern CPU core; GPU divides by ~10–50×):
 | **Per-block CPU at 100 tx/s**                  | ~ms                       | seconds (phone) — tens of s     | ms                              |
 | **Per-block bandwidth at 100 tx/s**            | tiny (one proof, one path)| ~9 MB (full block body)         | few KB (proof) + path           |
 | **Catches up after long offline period**       | trivial                   | linear in blocks-missed         | linear (verify each proof) but bounded by proof size |
-| **Implementation complexity**                  | done                      | ~1–2 days                       | weeks to months                 |
+| **Implementation complexity**                  | done                      | done (shipped)                  | weeks to months                 |
 | **Production maturity (in payment rollups)**   | not common                | not common                      | mature (zkSync, Loopring, Aztec)|
 
 ## Conclusion: defer ZK, ship direct verification
 
 For the POC and the foreseeable next stretch:
 
-- **Defer ZK entirely.** We've validated the toolchain (SP1 baseline
+- **ZK deferred.** We validated the toolchain (SP1 baseline
   measurement) and explored the design space (this doc). The work
   required to actually ship a halo2-KZG transfer-batch circuit is on
   the order of weeks-to-months and the payoff only matters above a
   throughput threshold we're not near.
-- **Implement direct block verification in the light client.** The
-  light wallet downloads recent L2 block bodies and verifies every
-  signature + state transition itself. At low-to-moderate transaction
-  volumes this is single-digit-milliseconds-per-block work, well
-  within budget for any device. The trust posture is now identical to
-  a full node, *without* needing the bitcoind dependency.
-- **Keep the current primitives** (BIP340 / sha256 / 256-level
+- **Direct block verification shipped.** `hodl-wallet light-balance`
+  replays every L2 block from genesis, re-verifies every signature +
+  mint witness + state transition, and reads balances from the
+  locally-rebuilt `LedgerState`. See `crates/hodl-wallet/src/verify.rs`.
+  At low-to-moderate transaction volumes this is single-digit-millisecond
+  per-block work, well within budget for any device. The trust posture
+  is now identical to a full node, *without* a bitcoind dependency.
+- **Current primitives unchanged** (BIP340 / sha256 / 256-level
   pubkey-indexed SMT). They're fine for direct verification; only ZK
-  needs them swapped.
+  would need them swapped.
 
 This is consistent with the POC scope. We're shipping a system that
 demonstrates the protocol end-to-end with strong-enough trust

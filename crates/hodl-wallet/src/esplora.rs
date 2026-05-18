@@ -1,14 +1,16 @@
 //! Esplora-compatible HTTP client for chain-walking the hodlcoin L1
-//! attestation chain.
+//! attestation chain and for the light client's direct verification
+//! pass.
 //!
-//! Uses two endpoints from the Esplora HTTP API:
+//! Uses these endpoints from the Esplora HTTP API:
 //!
-//!   GET /tx/:txid                    — tx info (we need vin + vout)
+//!   GET /tx/:txid                    — tx info (vin + vout + status)
 //!   GET /tx/:txid/outspend/:vout     — "is this outpoint spent? by whom?"
+//!   GET /blocks/tip/height           — current L1 tip height
 //!
 //! Real Esplora deployments (mempool.space, BlockStream's electrs)
 //! return richer JSON than we deserialise here; that's fine, serde
-//! ignores extras. Our `hodl-node` exposes the same two endpoints with
+//! ignores extras. Our `hodl-node` exposes the same endpoints with
 //! the slim shape these structs expect, so the demo works against the
 //! node without an external Esplora.
 
@@ -30,6 +32,17 @@ pub struct EsploraTx {
     pub txid: String,
     pub vin: Vec<EsploraVin>,
     pub vout: Vec<EsploraVout>,
+    #[serde(default)]
+    pub status: TxStatus,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct TxStatus {
+    /// L1 height at which the tx was mined; `None` for unconfirmed.
+    /// We don't read `status.confirmed` separately — `block_height
+    /// is_some()` is equivalent.
+    #[serde(default)]
+    pub block_height: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -44,6 +57,9 @@ pub struct EsploraVin {
 pub struct EsploraVout {
     /// scriptPubKey, hex-encoded.
     pub scriptpubkey: String,
+    /// Output value in satoshis.
+    #[serde(default)]
+    pub value: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -87,6 +103,21 @@ impl EsploraClient {
         }
         Ok(resp.json::<Outspend>().await
             .with_context(|| format!("decode Outspend from {url}"))?)
+    }
+
+    /// Current L1 tip height. Used by the light client to compute
+    /// confirmation counts for mint witness verification.
+    pub async fn tip_height(&self) -> Result<u32> {
+        let url = format!("{}/blocks/tip/height", self.base.trim_end_matches('/'));
+        let resp = self.http.get(&url).send().await
+            .with_context(|| format!("GET {url}"))?;
+        if !resp.status().is_success() {
+            bail!("{url} returned HTTP {}", resp.status());
+        }
+        let body = resp.text().await
+            .with_context(|| format!("read {url} body"))?;
+        body.trim().parse::<u32>()
+            .with_context(|| format!("parse tip height from {url}: {body:?}"))
     }
 }
 

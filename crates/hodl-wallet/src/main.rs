@@ -5,6 +5,7 @@
 mod api;
 mod bitcoind;
 mod esplora;
+mod verify;
 mod wallet;
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -66,10 +67,11 @@ enum Cmd {
     /// configured Esplora endpoint and report the current L2 head's
     /// state_root. No bitcoin node required.
     LightHead,
-    /// Light-client mode: walk the L1 chain to derive the current
-    /// state_root, then query an L2 balance with proof and verify the
-    /// proof against the L1-derived state_root. End-to-end trustless
-    /// (against the chosen Esplora) verification of an account's value.
+    /// Light-client mode: replay every L2 block from genesis, verifying
+    /// each one (mint witnesses against L1 via Esplora, transfer
+    /// signatures, state-root continuity). Then report the balance from
+    /// the locally-rebuilt LedgerState. End-to-end trustless wrt the
+    /// chosen Esplora + sequencer block-body endpoint.
     LightBalance(LightBalanceArgs),
 }
 
@@ -205,6 +207,7 @@ fn cmd_keygen(path: &std::path::Path, args: KeygenArgs) -> Result<()> {
         node_url: args.node_url,
         esplora_url: args.esplora_url,
         mints: Vec::new(),
+        verified_head: None,
     };
     wf.save(path)?;
     println!("wrote {}", path.display());
@@ -506,18 +509,96 @@ async fn cmd_light_balance(
     path: &std::path::Path,
     args: LightBalanceArgs,
 ) -> Result<()> {
-    // Reuse cmd_verify_balance with --against pre-populated from the L1 walk.
-    let wf = WalletFile::load(path)?;
-    let (state_root, l2_height, walked) = derive_state_root_from_l1(&wf).await?;
-    println!("L1-derived state_root at height {l2_height} (walked {walked}): {state_root}");
-    cmd_verify_balance(
-        path,
-        VerifyBalanceArgs {
-            addr: args.addr,
-            against: Some(state_root.to_hex()),
-        },
-    )
-    .await
+    let mut wf = WalletFile::load(path)?;
+    let secp = Secp256k1::new();
+    let own_addr = wf.xonly_pubkey(&secp)?;
+    let target = match &args.addr {
+        Some(s) => parse_xonly(s)?,
+        None => own_addr,
+    };
+
+    let esplora_url = wf
+        .esplora_url
+        .as_ref()
+        .ok_or_else(|| {
+            anyhow!("wallet has no esplora_url configured; pass --esplora-url to keygen")
+        })?
+        .clone();
+    let esplora = esplora::EsploraClient::new(esplora_url);
+    let api = ApiClient::new(wf.sequencer_url.clone(), wf.node_url.clone());
+
+    // Sanity-check any persisted head matches our current key.
+    if let Some(h) = &wf.verified_head {
+        if h.own_address != own_addr {
+            bail!(
+                "persisted verified_head tracks a different address ({}); \
+                 wallet key may have changed. Delete verified_head from the \
+                 wallet file to reset.",
+                hex::encode(h.own_address.serialize())
+            );
+        }
+    }
+
+    let (head, mode, blocks_verified) = match wf.verified_head.take() {
+        None => {
+            println!("cold-start: bootstrapping verified head from node + L1 chain...");
+            let h = verify::bootstrap(&api, &esplora, own_addr).await?;
+            println!("  bootstrapped at l2_height={} state_root={}", h.l2_height, h.state_root);
+            // Then a walk-forward — any blocks the node had after the
+            // bootstrap snapshot get verified statelessly.
+            let (h, n) = verify::walk_forward(h, &api, &esplora).await?;
+            (h, "cold-start", n)
+        }
+        Some(h) => {
+            let (h, n) = verify::walk_forward(h, &api, &esplora).await?;
+            (h, "warm-start", n)
+        }
+    };
+
+    println!("verified ({mode}, {blocks_verified} new block(s))");
+    println!("  l2_height:        {}", head.l2_height);
+    println!("  state_root:       {}", head.state_root);
+    println!("  accounts_root:    {}", head.accounts_root);
+    println!("  block_hash:       {}", head.block_hash);
+    println!("  l1_height:        {}", head.l1_height);
+
+    if target == own_addr {
+        let (balance, nonce) = verify::balance_from(&head, &own_addr);
+        println!("  address (own):    {}", hex::encode(own_addr.serialize()));
+        println!("  balance:          {} atoms", balance);
+        println!("  nonce:            {}", nonce);
+    } else {
+        // Query the node for the other address; verify the inclusion
+        // proof against our locally-verified accounts_root.
+        let bal = api.balance(&target).await?;
+        if bal.state_root != head.state_root {
+            bail!(
+                "node-reported state_root {} disagrees with verified head {}; \
+                 retry to let the node catch up",
+                bal.state_root,
+                head.state_root
+            );
+        }
+        if !bal.proof.verify(head.accounts_root) {
+            bail!("inclusion proof for {} does not verify against verified accounts_root",
+                  hex::encode(target.serialize()));
+        }
+        let (balance, nonce) = match bal.proof.leaf {
+            LeafKind::Account { balance, nonce } => (balance, nonce),
+            LeafKind::Empty => (0, 0),
+        };
+        if balance != bal.balance || nonce != bal.nonce {
+            bail!("inclusion-proof leaf disagrees with reported balance/nonce");
+        }
+        println!("  address:          {}", hex::encode(target.serialize()));
+        println!("  balance:          {} atoms", balance);
+        println!("  nonce:            {}", nonce);
+    }
+
+    // Persist the verified head back to the wallet file.
+    wf.verified_head = Some(head);
+    wf.save(path)?;
+    Ok(())
 }
 
 fn parse_xonly(s: &str) -> Result<XOnlyPublicKey> {

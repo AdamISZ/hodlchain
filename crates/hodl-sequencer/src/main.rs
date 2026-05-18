@@ -141,9 +141,11 @@ async fn bootstrap(
 
         let block = genesis(l1_block_hash, target, now, anchor_0);
         let state = LedgerState::new();
+        // Genesis carries no txs; its witness is trivially empty.
+        let witness = hodl_core::witness::BlockWitness::build(&state, &block.txs, 0);
         {
             let mut store_guard = store.lock().unwrap();
-            store_guard.write_block_and_state(&block, &state)?;
+            store_guard.write_block_and_state(&block, &state, &witness)?;
             store_guard.set_l1_cursor(target)?;
             store_guard.set_anchor(&anchor_0)?;
         }

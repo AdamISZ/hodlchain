@@ -36,10 +36,13 @@ pub fn router(state: AppState) -> Router {
         .route("/head", get(get_head))
         .route("/balance/:addr", get(get_balance))
         .route("/block/:height", get(get_block))
+        .route("/witness/:height", get(get_witness))
+        .route("/nullifiers", get(get_nullifiers))
         // Esplora-compatible (slim) endpoints so light wallets can walk
         // the L1 attestation chain via standard HTTP without bitcoind.
         .route("/tx/:txid", get(esplora_get_tx))
         .route("/tx/:txid/outspend/:vout", get(esplora_outspend))
+        .route("/blocks/tip/height", get(esplora_tip_height))
         .with_state(state)
         .merge(SwaggerUi::new("/docs").url("/openapi.json", ApiDoc::openapi()))
 }
@@ -60,8 +63,8 @@ pub fn router(state: AppState) -> Router {
         version = "0.1.0",
     ),
     paths(
-        get_head, get_balance, get_block,
-        esplora_get_tx, esplora_outspend,
+        get_head, get_balance, get_block, get_witness, get_nullifiers,
+        esplora_get_tx, esplora_outspend, esplora_tip_height,
     ),
     components(schemas(
         hodl_core::rpc::HeadResponse,
@@ -75,6 +78,7 @@ pub fn router(state: AppState) -> Router {
         hodl_core::tx::L2Tx,
         hodl_core::block::L2Block,
         hodl_core::block::L2BlockHeader,
+        hodl_core::witness::BlockWitness,
         hodl_core::state::StateComponents,
         hodl_core::state::Account,
         hodl_core::smt::InclusionProof,
@@ -85,6 +89,7 @@ pub fn router(state: AppState) -> Router {
         EsploraVin,
         EsploraVout,
         EsploraOutspend,
+        TxStatus,
     ))
 )]
 pub struct ApiDoc;
@@ -174,6 +179,43 @@ async fn get_block(
     }
 }
 
+#[utoipa::path(
+    get,
+    path = "/witness/{height}",
+    params(
+        ("height" = u32, Path, description = "L2 block height (>= 1; genesis has no witness)"),
+    ),
+    responses(
+        (status = 200, description = "Pre-state inclusion proofs for every account touched by the block at that height", body = hodl_core::witness::BlockWitness),
+        (status = 404, description = "No witness stored at that height"),
+    ),
+)]
+async fn get_witness(
+    State(app): State<AppState>,
+    Path(height): Path<u32>,
+) -> Result<Response, ApiError> {
+    let store = app.store.lock().unwrap();
+    match store.get_witness(height)? {
+        Some(w) => Ok(Json(w).into_response()),
+        None => Ok((StatusCode::NOT_FOUND, "no witness at that height").into_response()),
+    }
+}
+
+#[utoipa::path(
+    get,
+    path = "/nullifiers",
+    responses(
+        (status = 200, description = "Cumulative consumed-nullifier set (hex-encoded) at the node's head. Used by light wallets to bootstrap their persistent state so that subsequent blocks can incrementally update the nullifiers_hash.", body = Vec<String>),
+    ),
+)]
+async fn get_nullifiers(
+    State(app): State<AppState>,
+) -> Result<Json<Vec<String>>, ApiError> {
+    let state = app.shared.state.lock().unwrap();
+    let items: Vec<String> = state.consumed_nullifiers.iter().cloned().collect();
+    Ok(Json(items))
+}
+
 fn parse_xonly(s: &str) -> anyhow::Result<XOnlyPublicKey> {
     let bytes = hex::decode(s)?;
     Ok(XOnlyPublicKey::from_slice(&bytes)?)
@@ -189,14 +231,18 @@ fn parse_xonly(s: &str) -> anyhow::Result<XOnlyPublicKey> {
 // identically — the wallet just ignores the extra fields.
 
 /// Slim Esplora-shape transaction. Real Esplora returns more fields
-/// (block status, fee, sizes); we omit them — the wallet doesn't read
-/// them, and a wallet pointed at a real Esplora ignores the extras.
+/// (fee, sizes); we omit them — the wallet doesn't read them, and a
+/// wallet pointed at a real Esplora ignores the extras.
 #[derive(Serialize, ToSchema)]
 pub struct EsploraTx {
     /// Transaction id (32-byte hex).
     pub txid: String,
     pub vin: Vec<EsploraVin>,
     pub vout: Vec<EsploraVout>,
+    /// Confirmation status. Light clients use `status.block_height`
+    /// plus `/blocks/tip/height` to compute confirmation counts when
+    /// verifying mint witnesses.
+    pub status: TxStatus,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -213,6 +259,15 @@ pub struct EsploraVout {
     pub scriptpubkey: String,
     /// Output value in satoshis.
     pub value: u64,
+}
+
+#[derive(Serialize, ToSchema, Default)]
+pub struct TxStatus {
+    /// Whether the tx has been mined.
+    pub confirmed: bool,
+    /// L1 height at which the tx was mined (when `confirmed`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub block_height: Option<u32>,
 }
 
 /// Esplora-shape outspend response.
@@ -246,10 +301,10 @@ async fn esplora_get_tx(
     let txid = Txid::from_str(&txid_hex)
         .map_err(|e| ApiError(anyhow::anyhow!("bad txid {txid_hex}: {e}")))?;
     let l1 = app.l1.clone();
-    let tx = tokio::task::spawn_blocking(move || l1.get_tx(&txid))
+    let result = tokio::task::spawn_blocking(move || l1.get_tx_with_height(&txid))
         .await
         .map_err(|e| ApiError(anyhow::anyhow!("join: {e}")))?;
-    let tx = match tx {
+    let (tx, block_height) = match result {
         Ok(t) => t,
         Err(_) => return Ok((StatusCode::NOT_FOUND, "tx not found").into_response()),
     };
@@ -271,8 +326,30 @@ async fn esplora_get_tx(
                 value: o.value.to_sat(),
             })
             .collect(),
+        status: TxStatus {
+            confirmed: block_height.is_some(),
+            block_height,
+        },
     };
     Ok(Json(body).into_response())
+}
+
+#[utoipa::path(
+    get,
+    path = "/blocks/tip/height",
+    responses(
+        (status = 200, description = "Current L1 tip height as plain text", body = u32),
+    ),
+    tag = "Esplora",
+)]
+async fn esplora_tip_height(
+    State(app): State<AppState>,
+) -> Result<String, ApiError> {
+    let l1 = app.l1.clone();
+    let tip = tokio::task::spawn_blocking(move || l1.block_count())
+        .await
+        .map_err(|e| ApiError(anyhow::anyhow!("join: {e}")))??;
+    Ok(tip.to_string())
 }
 
 #[utoipa::path(

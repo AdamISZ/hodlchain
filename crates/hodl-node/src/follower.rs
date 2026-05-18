@@ -28,6 +28,7 @@ use hodl_core::op_return::Attestation;
 use hodl_core::proof::verify_mint_entry;
 use hodl_core::state::LedgerState;
 use hodl_core::tx::L2Tx;
+use hodl_core::witness::BlockWitness;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -136,9 +137,12 @@ impl Follower {
         }
 
         // Replay txs against current state. Apply, then close the block
-        // — `end_of_block` runs the retarget at window boundaries.
+        // — `end_of_block` runs the retarget at window boundaries. Keep
+        // a pristine pre-block snapshot for the witness; inclusion
+        // proofs must be taken at the prior state_root.
         let secp = Secp256k1::new();
-        let mut next_state: LedgerState = self.shared.state.lock().unwrap().clone();
+        let prior_state: LedgerState = self.shared.state.lock().unwrap().clone();
+        let mut next_state: LedgerState = prior_state.clone();
         for tx in &block.txs {
             next_state
                 .apply(&secp, tx)
@@ -175,13 +179,21 @@ impl Follower {
             state_root: block.header.state_root,
             l1_height: adv.l1_height,
         };
+        // Build the witness from the pristine pre-block state before
+        // committing.
+        let witness = BlockWitness::build(&prior_state, &block.txs, block.header.height);
+
         {
             let mut state = self.shared.state.lock().unwrap();
             *state = next_state;
         }
         {
             let mut store = self.store.lock().unwrap();
-            store.write_block_and_state(&block, &*self.shared.state.lock().unwrap())?;
+            store.write_block_and_state(
+                &block,
+                &*self.shared.state.lock().unwrap(),
+                &witness,
+            )?;
             store.set_anchor(&adv.new_anchor)?;
             // Record the chain link for the Esplora-compatible /outspend
             // endpoint that light clients walk.

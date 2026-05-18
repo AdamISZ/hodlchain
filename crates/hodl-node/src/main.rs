@@ -159,7 +159,10 @@ async fn bootstrap(
 
     {
         let mut s = store.lock().unwrap();
-        s.write_block_and_state(&genesis, &state)?;
+        // Genesis carries no txs and no state transition; its witness
+        // is trivially empty.
+        let witness = hodl_core::witness::BlockWitness::build(&state, &genesis.txs, 0);
+        s.write_block_and_state(&genesis, &state, &witness)?;
         // Start scanning from the genesis L1 height; the first real
         // attestation tx can only land at L1 height >= genesis + 1.
         s.set_l1_cursor(cfg.l1_genesis_height)?;

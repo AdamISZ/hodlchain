@@ -8,6 +8,7 @@ use hodl_core::op_return::Attestation;
 use hodl_core::proof::MintProof;
 use hodl_core::state::LedgerState;
 use hodl_core::tx::{L2Tx, MintEntry};
+use hodl_core::witness::BlockWitness;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -70,7 +71,10 @@ impl Producer {
 
         let secp = Secp256k1::new();
         // Apply candidate txs to a clone of current state; drop invalid ones.
-        let mut state_clone: LedgerState = self.shared.state.lock().unwrap().clone();
+        // Keep a pristine pre-block clone for the block witness — we
+        // need its inclusion proofs *before* the state is mutated.
+        let prior_state: LedgerState = self.shared.state.lock().unwrap().clone();
+        let mut state_clone: LedgerState = prior_state.clone();
         // Snapshot the active r at block start — every mint in this block
         // earns amounts computed at this r (so the node, replaying with
         // the same state, produces matching credits).
@@ -140,6 +144,11 @@ impl Producer {
         let block = L2Block { header, txs };
         let block_hash = block.hash();
 
+        // Build the witness from the pristine pre-block state. Inclusion
+        // proofs taken now are valid against `prior_state.state_root()`,
+        // which equals the L2 chain's prior `state_root`.
+        let witness = BlockWitness::build(&prior_state, &block.txs, new_height);
+
         // Commit: replace state, persist, advance head + cursor.
         {
             let mut state = self.shared.state.lock().unwrap();
@@ -147,7 +156,11 @@ impl Producer {
         }
         {
             let mut store = self.store.lock().unwrap();
-            store.write_block_and_state(&block, &*self.shared.state.lock().unwrap())?;
+            store.write_block_and_state(
+                &block,
+                &*self.shared.state.lock().unwrap(),
+                &witness,
+            )?;
             store.set_l1_cursor(l1_height)?;
         }
         {

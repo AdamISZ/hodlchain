@@ -125,7 +125,7 @@ mkdir -p "$DATA_DIR/bitcoin"
 
 cat > "$DATA_DIR/bitcoin/bitcoin.conf" <<EOF
 fallbackfee=0.00001
-# txindex=1 lets `getrawtransaction <txid>` succeed without a wallet
+# txindex=1 lets 'getrawtransaction <txid>' succeed without a wallet
 # context or a blockhash hint — required for the node's Esplora-
 # compatible /tx/:txid endpoint that light wallets walk through.
 txindex=1
@@ -350,7 +350,29 @@ say "verifying a non-existent address (expect: empty leaf, balance=0)"
 say "light-client head (derive state_root from L1 attestation chain via Esplora)"
 "$WALLET_BIN" --wallet "$ALICE_WALLET" light-head | sed 's/^/    /'
 
-say "light-client balance for alice (L1-walk + proof verify, end-to-end)"
+say "light-client balance for alice (cold-start: bootstrap + sparse walk)"
+"$WALLET_BIN" --wallet "$ALICE_WALLET" light-balance | sed 's/^/    /'
+
+# Now exercise the warm-start path: a fresh transfer, mine, re-run
+# light-balance. The wallet should report "warm-start" with just the
+# new block(s) verified incrementally — not a fresh bootstrap.
+say "alice transfers an additional 10000 atoms to bob (to exercise warm-start)"
+"$WALLET_BIN" --wallet "$ALICE_WALLET" transfer --to "$BOB_ADDR" --amount 10000 \
+    | sed 's/^/    /'
+say "mining 2 blocks to land the new attestation"
+btc generatetoaddress 1 "$USER_ADDR" >/dev/null
+sleep 1.5
+btc generatetoaddress 1 "$USER_ADDR" >/dev/null
+sleep 2.0
+
+# Wait until the node has the new height.
+for _ in {1..20}; do
+    NH=$(curl -s "http://127.0.0.1:$NODE_PORT/head" | jq -r '.height')
+    if [ "$NH" -ge 5 ]; then break; fi
+    sleep 0.25
+done
+
+say "light-client balance for alice (warm-start: incremental sparse walk)"
 "$WALLET_BIN" --wallet "$ALICE_WALLET" light-balance | sed 's/^/    /'
 
 say "OpenAPI specs"

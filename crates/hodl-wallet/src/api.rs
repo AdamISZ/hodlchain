@@ -9,6 +9,7 @@ use hodl_core::rpc::{
     SubmitTransferRequest, SubmitTransferResponse,
 };
 use hodl_core::tx::{L2Address, SignedTransfer};
+use hodl_core::witness::BlockWitness;
 use reqwest::Client;
 
 pub struct ApiClient {
@@ -86,6 +87,34 @@ impl ApiClient {
             base.trim_end_matches('/'),
             hex::encode(addr.serialize())
         );
+        let resp = self.http.get(&url).send().await
+            .with_context(|| format!("GET {url}"))?;
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(anyhow!("{url} returned HTTP {status}"));
+        }
+        Ok(resp.json().await?)
+    }
+
+    /// Block-witness lookup. Prefers the node.
+    pub async fn get_witness(&self, height: u32) -> Result<BlockWitness> {
+        let base = self.node_url.as_deref().unwrap_or(&self.sequencer_url);
+        let url = format!("{}/witness/{}", base.trim_end_matches('/'), height);
+        let resp = self.http.get(&url).send().await
+            .with_context(|| format!("GET {url}"))?;
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(anyhow!("{url} returned HTTP {status}"));
+        }
+        Ok(resp.json().await
+            .with_context(|| format!("decode BlockWitness from {url}"))?)
+    }
+
+    /// Cumulative consumed-nullifier set at the server's head. Used
+    /// by the wallet's cold-start bootstrap. Node-only.
+    pub async fn get_nullifiers(&self) -> Result<Vec<String>> {
+        let base = self.node_url.as_deref().unwrap_or(&self.sequencer_url);
+        let url = format!("{}/nullifiers", base.trim_end_matches('/'));
         let resp = self.http.get(&url).send().await
             .with_context(|| format!("GET {url}"))?;
         let status = resp.status();

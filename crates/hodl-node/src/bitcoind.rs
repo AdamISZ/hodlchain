@@ -41,11 +41,25 @@ impl NodeL1 {
         u32::try_from(n).map_err(|_| anyhow!("block count overflows u32: {n}"))
     }
 
-    /// Fetch a transaction by txid. Returns the deserialised `bitcoin::Transaction`
-    /// so callers can shape it however they want (e.g. into Esplora JSON).
-    pub fn get_tx(&self, txid: &Txid) -> Result<bitcoin::Transaction> {
+    /// Fetch a transaction by txid, plus the L1 block height at which it
+    /// was confirmed (None if unconfirmed). Used by the Esplora `/tx`
+    /// endpoint to fill in `status.block_height` so a light wallet can
+    /// compute confirmation counts during mint-witness verification.
+    pub fn get_tx_with_height(
+        &self,
+        txid: &Txid,
+    ) -> Result<(bitcoin::Transaction, Option<u32>)> {
         let c = self.client.lock().unwrap();
-        Ok(c.get_raw_transaction(txid, None)?)
+        let info = c.get_raw_transaction_info(txid, None)?;
+        let tx = info.transaction().with_context(|| format!("decode tx {txid}"))?;
+        let height = match (info.confirmations, c.get_block_count().ok()) {
+            (Some(confs), Some(tip)) if confs > 0 => {
+                let tip = tip as u32;
+                Some(tip.saturating_sub(confs).saturating_add(1))
+            }
+            _ => None,
+        };
+        Ok((tx, height))
     }
 
     /// Walk every tx in L1 block `h` looking for one that spends

@@ -353,33 +353,39 @@ POC implementation (`hodl-wallet`):
   walk the attestation chain via Esplora endpoints
   (`/tx/:txid/outspend/:vout` + `/tx/:txid`), report the latest
   `state_root` derived from L1.
-- `light-balance` — `light-head` followed by `verify-balance --against
-  <L1-derived state_root>` in one go. Trustless against the chosen
-  Esplora.
+- `light-balance` — walk the L1 chain to enumerate every L2 block;
+  fetch each body from the node/sequencer; re-verify every transfer
+  signature, every mint witness (via Esplora, no bitcoind), and the
+  state_root at every height; then read the balance from the
+  locally-rebuilt `LedgerState`. No honest-validator assumption.
 
 The demo runs all of `verify-balance`, `light-head`, `light-balance`
 against `hodl-node`, which exposes the Esplora-compatible subset
-(`GET /tx/:txid` and `GET /tx/:txid/outspend/:vout`) backed by its
-own `anchor_spends` SQLite index plus bitcoind's `getrawtransaction`
-(`txindex=1` required). In production the wallet's `esplora_url` would
-point at mempool.space / an electrs deployment / the user's own
-electrs, *not* at hodl-node — the API surface is the same.
+(`GET /tx/:txid`, `GET /tx/:txid/outspend/:vout`, and `GET
+/blocks/tip/height`) backed by its own `anchor_spends` SQLite index
+plus bitcoind's `getrawtransaction` (`txindex=1` required). In
+production the wallet's `esplora_url` would point at mempool.space /
+an electrs deployment / the user's own electrs, *not* at hodl-node —
+the API surface is the same.
 
 ### Where light-client trust still leaks (v0)
 
-- **State-transition correctness** — the light client trusts that
-  `state_root` is the *valid* result of applying the L2 block's txs.
-  In v0 this is an honest-majority assumption among full validators
-  (`hodl-node`). In a later iteration, a ZK validity proof shipped
-  alongside each block body closes this gap entirely.
-- **Block-body availability** — to compute one's own balance one needs
-  to ask *someone* who can produce the inclusion proof. The sequencer
-  is the obvious candidate; nodes can also serve it. A malicious
-  sequencer that refuses to serve a particular user's proof censors
-  that user. Migrating to a public DA layer (e.g. Celestia) for block
-  bodies closes this.
+- **Block-body availability** — to replay, the wallet must download
+  every L2 block body from *someone*. The sequencer is the obvious
+  candidate; nodes can also serve them. A malicious sequencer that
+  refuses to serve a particular block body halts every light client.
+  Migrating to a public DA layer (e.g. Celestia) for block bodies
+  closes this.
+- **Esplora honesty** — the wallet does not do Bitcoin SPV /
+  merkle-path verification of the L1 attestation tx or of mint
+  outpoints. The chosen Esplora endpoint is trusted not to lie about
+  what L1 contains. Pointing the wallet at a locally-run electrs
+  removes this.
 - **Sequencer liveness** — the sequencer can stop producing blocks at
   will. Replaced later by multi-sequencer / sequencer rotation.
+- **Mint anonymity** — full nodes (and any Esplora endpoint the wallet
+  pulls mint outpoints from) see which L1 UTXO funded a given L2
+  mint. Future work: anonymous mint via aut-ct ring proofs.
 
 ## API reference
 
@@ -397,7 +403,8 @@ hodl-node (default port 28081):
   GET  /docs/           — Swagger UI
   GET  /openapi.json    — raw OpenAPI spec
   Paths: /head, /balance/:addr, /block/:height,
-         /tx/:txid, /tx/:txid/outspend/:vout
+         /tx/:txid, /tx/:txid/outspend/:vout,
+         /blocks/tip/height
 ```
 
 Request and response schemas are derived from the `#[derive(ToSchema)]`
