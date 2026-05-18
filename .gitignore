@@ -14,6 +14,8 @@ data/
 # safety net if you ever move it inside the repo.
 /tmp/hodl-regtest/
 
-# Paper drafts and LaTeX build artifacts. Only design.md is tracked.
+# Paper drafts and LaTeX build artifacts. Only the design markdown
+# files are tracked.
 docs/*
 !docs/design.md
+!docs/zk-design-discussion.md

@@ -146,7 +146,8 @@ What's still trusted (deferred to later work):
   L2 state transitions (i.e. that signatures verified, balances were
   spent correctly, retargeting was computed correctly). Today this
   relies on the honest-majority assumption among `hodl-node`-class
-  full validators. Closed by a ZK validity proof.
+  full validators. The next step (see roadmap) replaces this with the
+  light client verifying L2 blocks directly.
 - That mint witnesses themselves actually authorise the L2 token
   issuance. Full nodes verify this against L1; light clients trust
   them. Closed by an anonymous mint variant (aut-ct ring proofs) or
@@ -159,12 +160,13 @@ What's still trusted (deferred to later work):
 Working through:
 
 1. **README + housekeeping** ✓ (this file).
-2. **ZK validity proof for transfer state transitions** (in progress).
-   Transfers + retargeting + SMT updates verified by a SP1-generated
-   proof; light clients fetch and verify it. Mints continue to be
-   verified by full nodes only (separate future work). See design.md
-   for the trust-model implications.
-3. **End-to-end desktop client** (next). A polished `egui` app
+2. **Direct block verification in the light client** (next). The
+   light wallet downloads recent L2 block bodies and verifies every
+   signature + state transition itself, eliminating the
+   honest-validator-majority trust assumption at POC scale. See
+   `docs/zk-design-discussion.md` for the design-space survey that
+   led to picking this over ZK validity proofs.
+3. **End-to-end desktop client**. A polished `egui` app
    bundling the L1 mint flow and the L2 state-light-validating
    wallet — the demo target for non-developer users.
 

@@ -2,11 +2,14 @@
 //!
 //! See `docs/design.md` and `docs/issuance.tex`.
 //!
-//! Compiles with `default-features = false` (no `std`) for use inside
-//! SP1 zk-programs: the state machine, SMT, hashing, types, and proof
-//! verification are all `no_std`. The `std` feature additionally pulls
-//! in daemon-side helpers (`config`, `schemas`, the utoipa OpenAPI
-//! derives) that aren't needed inside the prover.
+//! Compiles with `default-features = false` (no `std`): the state
+//! machine, SMT, hashing, types, and proof verification are all
+//! `no_std`-compatible. The `std` feature additionally pulls in
+//! daemon-side helpers (`config`, `schemas`, the utoipa OpenAPI
+//! derives). The split was originally added to support an SP1
+//! zkVM build target (since removed — see
+//! `docs/zk-design-discussion.md`); the no_std capability has been
+//! kept since it imposes no runtime cost on daemons.
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
