@@ -375,6 +375,50 @@ done
 say "light-client balance for alice (warm-start: incremental sparse walk)"
 "$WALLET_BIN" --wallet "$ALICE_WALLET" light-balance | sed 's/^/    /'
 
+# --- Step 7: L1 reclaim of a short-lock mint -------------------------------
+#
+# Demonstrates the BTC deposit → CSV unlock → recover loop. We use a
+# short lock_blocks=10 so the regtest demo can mine past CSV in
+# seconds; we skip the mint-message step on this UTXO (mint_fn with
+# the default r rounds to zero at T=10, which is a separate issuance
+# concern). The reclaim works regardless of whether the user ever
+# submitted a mint message.
+
+SHORT_LOCK=10
+say "alice creates a short-lock mint UTXO (T=$SHORT_LOCK blocks, V=0.05 BTC) for the reclaim demo"
+"$WALLET_BIN" --wallet "$ALICE_WALLET" mint-utxo \
+    --lock-blocks "$SHORT_LOCK" --value-btc 0.05 | sed 's/^/    /'
+btc generatetoaddress 1 "$USER_ADDR" >/dev/null
+sleep 0.5
+SHORT_OUTPOINT=$("$WALLET_BIN" --wallet "$ALICE_WALLET" list-mints | tail -1 | awk '{print $1}')
+dim "short-lock outpoint: $SHORT_OUTPOINT"
+
+say "reclaim-list before CSV maturity (expect: 'locked: N blocks remaining')"
+"$WALLET_BIN" --wallet "$ALICE_WALLET" reclaim-list | sed 's/^/    /'
+
+# Mine enough L1 blocks to cross the CSV threshold. The funding tx
+# landed one block ago; we need `lock_blocks` more.
+say "mining $SHORT_LOCK more blocks to mature the CSV"
+btc generatetoaddress "$SHORT_LOCK" "$USER_ADDR" >/dev/null
+sleep 0.5
+
+say "reclaim-list after maturity (expect: 'READY')"
+"$WALLET_BIN" --wallet "$ALICE_WALLET" reclaim-list | sed 's/^/    /'
+
+DEST_ADDR=$(btc_user getnewaddress)
+say "reclaim the short-lock mint to $DEST_ADDR"
+"$WALLET_BIN" --wallet "$ALICE_WALLET" reclaim \
+    --outpoint "$SHORT_OUTPOINT" --to "$DEST_ADDR" | sed 's/^/    /'
+btc generatetoaddress 1 "$USER_ADDR" >/dev/null
+sleep 0.5
+
+say "reclaim-list after reclaim (expect: 'reclaimed')"
+"$WALLET_BIN" --wallet "$ALICE_WALLET" reclaim-list | sed 's/^/    /'
+
+DEST_BAL_SAT=$(btc_user listunspent 1 9999999 "[\"$DEST_ADDR\"]" \
+    | jq -r 'map(.amount * 100000000) | add // 0' | awk '{printf "%d", $1}')
+dim "received at $DEST_ADDR: $DEST_BAL_SAT sat (out of 5000000 sat locked, less reclaim fee)"
+
 say "OpenAPI specs"
 echo -n "    sequencer /openapi.json: "
 curl -sf "http://127.0.0.1:$SEQ_PORT/openapi.json" \

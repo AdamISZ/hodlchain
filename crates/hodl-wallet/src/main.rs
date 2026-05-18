@@ -9,7 +9,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use bitcoin::secp256k1::XOnlyPublicKey;
 use clap::{Parser, Subcommand};
 use hodl_core::hash::H256;
-use hodl_wallet::ops::{self, LightBalanceMode};
+use hodl_wallet::ops::{self, LightBalanceMode, ReclaimStatus};
 use hodl_wallet::wallet::{
     network_from_str, BitcoindAuth, BitcoindConfig, DEFAULT_WALLET_PATH,
 };
@@ -60,6 +60,11 @@ enum Cmd {
     /// the locally-rebuilt LedgerState. End-to-end trustless wrt the
     /// chosen Esplora + sequencer block-body endpoint.
     LightBalance(LightBalanceArgs),
+    /// List mint UTXOs with their reclaim status (pending confirmation,
+    /// locked for N more blocks, ready to reclaim, or already reclaimed).
+    ReclaimList,
+    /// Spend a CSV-matured mint UTXO back to an L1 destination address.
+    Reclaim(ReclaimArgs),
 }
 
 #[derive(clap::Args, Debug)]
@@ -133,6 +138,20 @@ struct LightBalanceArgs {
 }
 
 #[derive(clap::Args, Debug)]
+struct ReclaimArgs {
+    /// "<txid>:<vout>" of the mint UTXO to reclaim.
+    #[arg(long)]
+    outpoint: String,
+    /// Destination L1 address.
+    #[arg(long)]
+    to: String,
+    /// Absolute miner fee in satoshis. Default 1000 sat — comfortable
+    /// for low-feerate environments, irrelevant on regtest.
+    #[arg(long, default_value = "1000")]
+    fee_sat: u64,
+}
+
+#[derive(clap::Args, Debug)]
 struct VerifyBalanceArgs {
     /// Address to query (x-only pubkey hex). Defaults to our own address.
     #[arg(long)]
@@ -162,6 +181,8 @@ async fn main() -> Result<()> {
         Cmd::Head => cmd_head(wallet).await,
         Cmd::LightHead => cmd_light_head(wallet).await,
         Cmd::LightBalance(args) => cmd_light_balance(wallet, args).await,
+        Cmd::ReclaimList => cmd_reclaim_list(wallet),
+        Cmd::Reclaim(args) => cmd_reclaim(wallet, args),
     }
 }
 
@@ -351,6 +372,52 @@ async fn cmd_light_balance(wallet_path: &std::path::Path, args: LightBalanceArgs
     println!("  {} {}", label, hex::encode(out.address.serialize()));
     println!("  balance:          {} atoms", out.balance);
     println!("  nonce:            {}", out.nonce);
+    Ok(())
+}
+
+fn cmd_reclaim_list(wallet_path: &std::path::Path) -> Result<()> {
+    let mints = ops::list_reclaimable_mints(wallet_path)?;
+    if mints.is_empty() {
+        println!("(no recorded mints)");
+        return Ok(());
+    }
+    for m in &mints {
+        let minted_tag = if m.minted { "minted" } else { "no-mint" };
+        let status = match m.status {
+            ReclaimStatus::Pending => "pending confirmation".to_string(),
+            ReclaimStatus::Locked => format!(
+                "locked: {} block(s) remaining (funded @ {})",
+                m.blocks_remaining.unwrap_or(0),
+                m.funded_at_height.unwrap_or(0),
+            ),
+            ReclaimStatus::Ready => format!(
+                "READY (funded @ {})",
+                m.funded_at_height.unwrap_or(0)
+            ),
+            ReclaimStatus::Reclaimed => "reclaimed".to_string(),
+        };
+        println!(
+            "{} v={}sat T={}blocks bip32_idx={} l2={}  ⇒ {}",
+            m.outpoint, m.value_sat, m.lock_blocks, m.bip32_index, minted_tag, status
+        );
+    }
+    Ok(())
+}
+
+fn cmd_reclaim(wallet_path: &std::path::Path, args: ReclaimArgs) -> Result<()> {
+    let out = ops::reclaim_mint(
+        wallet_path,
+        ops::ReclaimMintInput {
+            outpoint: args.outpoint,
+            dest_address: args.to,
+            fee_sat: args.fee_sat,
+        },
+    )?;
+    println!("broadcast reclaim tx");
+    println!("  txid:      {}", out.txid);
+    println!("  value in:  {} sat", out.value_sat_in);
+    println!("  value out: {} sat", out.value_sat_out);
+    println!("  fee:       {} sat", out.fee_sat);
     Ok(())
 }
 

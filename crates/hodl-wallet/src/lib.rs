@@ -19,5 +19,6 @@ pub mod api;
 pub mod bitcoind;
 pub mod esplora;
 pub mod ops;
+pub mod reclaim;
 pub mod verify;
 pub mod wallet;

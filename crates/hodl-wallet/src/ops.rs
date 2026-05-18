@@ -18,7 +18,7 @@
 use anyhow::{anyhow, bail, Context, Result};
 use bip39::Mnemonic;
 use bitcoin::secp256k1::{Message, Secp256k1, XOnlyPublicKey};
-use bitcoin::{Amount, OutPoint, Txid};
+use bitcoin::{Address, Amount, OutPoint, Txid};
 use hodl_core::consensus::MAX_LOCK_BLOCKS;
 use hodl_core::hash::H256;
 use hodl_core::l1::{derive_mint_taproot, mint_address};
@@ -29,10 +29,12 @@ use hodl_core::state::LedgerState;
 use hodl_core::tx::{SignedTransfer, TransferBody};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
+use std::str::FromStr;
 
 use crate::api::ApiClient;
 use crate::bitcoind::Bitcoind;
 use crate::esplora::{self, EsploraClient};
+use crate::reclaim;
 use crate::verify;
 use crate::wallet::{
     parse_outpoint, BitcoindConfig, MintRecord, NetworkName, WalletFile,
@@ -143,6 +145,7 @@ pub fn mint_utxo(wallet_path: &Path, input: MintUtxoInput) -> Result<MintUtxoOut
         lock_blocks: input.lock_blocks,
         bip32_index,
         minted: false,
+        reclaimed: false,
     });
     wf.save(wallet_path)?;
     Ok(MintUtxoOutput {
@@ -555,4 +558,181 @@ pub async fn light_balance(wallet_path: &Path, input: LightBalanceInput) -> Resu
     wf.verified_head = Some(head);
     wf.save(wallet_path)?;
     Ok(output)
+}
+
+// ---------- Reclaim: list reclaimable mints ----------
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ReclaimStatus {
+    /// Funding tx not yet confirmed on L1.
+    Pending,
+    /// CSV not yet matured. `blocks_remaining` is how many more L1
+    /// blocks until it can be reclaimed.
+    Locked,
+    /// CSV matured; can be reclaimed now.
+    Ready,
+    /// Wallet already broadcast a reclaim tx for this mint.
+    Reclaimed,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ReclaimableMint {
+    pub outpoint: String,
+    pub value_sat: u64,
+    pub lock_blocks: u32,
+    pub bip32_index: u32,
+    pub minted: bool,
+    pub status: ReclaimStatus,
+    /// Set when status is Locked or Ready. None when Pending or
+    /// Reclaimed.
+    pub funded_at_height: Option<u32>,
+    /// Blocks remaining until CSV maturity. Zero when Ready, None when
+    /// Pending or Reclaimed.
+    pub blocks_remaining: Option<u32>,
+}
+
+pub fn list_reclaimable_mints(wallet_path: &Path) -> Result<Vec<ReclaimableMint>> {
+    let wf = WalletFile::load(wallet_path)?;
+    let bd = Bitcoind::connect(&wf.bitcoind)?;
+    let tip = bd.block_count()?;
+
+    let mut out = Vec::with_capacity(wf.mints.len());
+    for m in &wf.mints {
+        let outpoint: OutPoint = parse_outpoint(&m.outpoint)?;
+        if m.reclaimed {
+            out.push(ReclaimableMint {
+                outpoint: m.outpoint.clone(),
+                value_sat: m.value_sat,
+                lock_blocks: m.lock_blocks,
+                bip32_index: m.bip32_index,
+                minted: m.minted,
+                status: ReclaimStatus::Reclaimed,
+                funded_at_height: None,
+                blocks_remaining: None,
+            });
+            continue;
+        }
+        let (confirmed_at, _) = bd.tx_confirmation(&outpoint.txid)?;
+        let (status, funded_at_height, blocks_remaining) = match confirmed_at {
+            None => (ReclaimStatus::Pending, None, None),
+            Some(h) => {
+                // CSV-mature condition: spend tx mineable in block at
+                // height >= funded_at + lock_blocks. So the spend can
+                // be mined "right now" when tip + 1 >= that bound.
+                let unlock_height = h.saturating_add(m.lock_blocks);
+                if tip.saturating_add(1) >= unlock_height {
+                    (ReclaimStatus::Ready, Some(h), Some(0))
+                } else {
+                    let remaining = unlock_height.saturating_sub(tip.saturating_add(1));
+                    (ReclaimStatus::Locked, Some(h), Some(remaining))
+                }
+            }
+        };
+        out.push(ReclaimableMint {
+            outpoint: m.outpoint.clone(),
+            value_sat: m.value_sat,
+            lock_blocks: m.lock_blocks,
+            bip32_index: m.bip32_index,
+            minted: m.minted,
+            status,
+            funded_at_height,
+            blocks_remaining,
+        });
+    }
+    Ok(out)
+}
+
+// ---------- Reclaim: build, sign, broadcast ----------
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ReclaimMintInput {
+    /// "<txid>:<vout>" of the mint UTXO to reclaim.
+    pub outpoint: String,
+    /// Destination L1 address. Network must match the wallet's network.
+    pub dest_address: String,
+    /// Absolute fee in satoshis. Reclaim tx is small and predictable
+    /// (~150 vB for a script-path Taproot spend with our 2-leaf tree);
+    /// 1000 sat is a comfortable default for low-feerate environments
+    /// and irrelevant on regtest.
+    #[serde(default = "default_fee_sat")]
+    pub fee_sat: u64,
+}
+
+fn default_fee_sat() -> u64 {
+    1000
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ReclaimMintOutput {
+    pub txid: Txid,
+    pub value_sat_in: u64,
+    pub value_sat_out: u64,
+    pub fee_sat: u64,
+}
+
+pub fn reclaim_mint(wallet_path: &Path, input: ReclaimMintInput) -> Result<ReclaimMintOutput> {
+    let mut wf = WalletFile::load(wallet_path)?;
+    let secp = Secp256k1::new();
+    let network = wf.network.into_bitcoin();
+
+    // Find the mint record.
+    let record_index = wf
+        .mints
+        .iter()
+        .position(|m| m.outpoint == input.outpoint)
+        .ok_or_else(|| anyhow!("no mint record for {}", input.outpoint))?;
+    let record = wf.mints[record_index].clone();
+    if record.reclaimed {
+        bail!("mint {} already reclaimed", input.outpoint);
+    }
+    let outpoint: OutPoint = parse_outpoint(&record.outpoint)?;
+
+    // Parse destination address with strict network binding.
+    let dest = Address::from_str(&input.dest_address)
+        .with_context(|| format!("parse destination address {:?}", input.dest_address))?
+        .require_network(network)
+        .with_context(|| format!("destination address is not on network {network:?}"))?;
+
+    // CSV-maturity check. Same logic as list_reclaimable_mints.
+    let bd = Bitcoind::connect(&wf.bitcoind)?;
+    let tip = bd.block_count()?;
+    let (confirmed_at, _) = bd.tx_confirmation(&outpoint.txid)?;
+    let funded_at = confirmed_at
+        .ok_or_else(|| anyhow!("mint funding tx {} unconfirmed", outpoint.txid))?;
+    let unlock_height = funded_at.saturating_add(record.lock_blocks);
+    if tip.saturating_add(1) < unlock_height {
+        let remaining = unlock_height.saturating_sub(tip.saturating_add(1));
+        bail!(
+            "mint not yet reclaimable: needs {} more L1 block(s) (unlock at {}, tip {})",
+            remaining,
+            unlock_height,
+            tip
+        );
+    }
+
+    // Derive the mint key (BIP32) and build the signed reclaim tx.
+    let mint_kp = wf.mint_keypair(&secp, record.bip32_index)?;
+    let tx = reclaim::build_signed_reclaim_tx(
+        &secp,
+        &mint_kp,
+        outpoint,
+        record.value_sat,
+        record.lock_blocks,
+        &dest,
+        input.fee_sat,
+    )?;
+
+    let txid = bd.send_raw_transaction(&tx).context("broadcast reclaim tx")?;
+
+    // Mark the mint as reclaimed and persist.
+    wf.mints[record_index].reclaimed = true;
+    wf.save(wallet_path)?;
+
+    Ok(ReclaimMintOutput {
+        txid,
+        value_sat_in: record.value_sat,
+        value_sat_out: record.value_sat.saturating_sub(input.fee_sat),
+        fee_sat: input.fee_sat,
+    })
 }

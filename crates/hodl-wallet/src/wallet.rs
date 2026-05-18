@@ -104,6 +104,10 @@ pub struct MintRecord {
     /// authoritative.
     #[serde(default)]
     pub minted: bool,
+    /// True once we have broadcast a reclaim transaction. Local hint;
+    /// bitcoind / Esplora is authoritative.
+    #[serde(default)]
+    pub reclaimed: bool,
 }
 
 pub fn parse_outpoint(s: &str) -> Result<OutPoint> {

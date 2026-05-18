@@ -49,6 +49,27 @@ impl Bitcoind {
         Ok((txid, vout))
     }
 
+    /// Broadcast a signed transaction. Returns its txid.
+    pub fn send_raw_transaction(&self, tx: &Transaction) -> Result<Txid> {
+        Ok(self.client.send_raw_transaction(tx)?)
+    }
+
+    /// Get the L1 block height at which `txid` was mined, plus the
+    /// current tip. Returns (confirmed_at_height, tip_height). Returns
+    /// `(None, tip)` if the tx is in the mempool but unconfirmed, and
+    /// errors if the tx is unknown.
+    pub fn tx_confirmation(&self, txid: &Txid) -> Result<(Option<u32>, u32)> {
+        let tip = self.block_count()?;
+        let info = self
+            .client
+            .get_raw_transaction_info(txid, None)
+            .with_context(|| format!("get_raw_transaction_info({txid})"))?;
+        let confirmed_at = match info.confirmations {
+            Some(c) if c > 0 => Some(tip.saturating_sub(c).saturating_add(1)),
+            _ => None,
+        };
+        Ok((confirmed_at, tip))
+    }
 }
 
 fn find_vout(tx: &Transaction, expected_spk: &ScriptBuf) -> Option<u32> {
