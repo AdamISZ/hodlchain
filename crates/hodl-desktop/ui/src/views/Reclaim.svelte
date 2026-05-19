@@ -137,6 +137,7 @@
         onclick={(e) => e.stopPropagation()}
         onkeydown={(e) => e.stopPropagation()}
         role="dialog"
+        tabindex="-1"
       >
         <h3>reclaim {dialog.outpoint}</h3>
         <div class="field">
