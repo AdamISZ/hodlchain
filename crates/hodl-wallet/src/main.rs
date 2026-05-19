@@ -5,14 +5,12 @@
 //! in this file; if you find yourself reaching past `ops` for the
 //! `api` / `bitcoind` / `verify` modules directly, refactor it.
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{anyhow, Context, Result};
 use bitcoin::secp256k1::XOnlyPublicKey;
 use clap::{Parser, Subcommand};
 use hodl_core::hash::H256;
-use hodl_wallet::ops::{self, LightBalanceMode, ReclaimStatus};
-use hodl_wallet::wallet::{
-    network_from_str, BitcoindAuth, BitcoindConfig, DEFAULT_WALLET_PATH,
-};
+use hodl_wallet::ops::{self, LightBalanceMode, MintFundingState, ReclaimStatus};
+use hodl_wallet::wallet::{network_from_str, DEFAULT_WALLET_PATH};
 use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
@@ -32,11 +30,17 @@ enum Cmd {
     Keygen(KeygenArgs),
     /// Print our L2 address (x-only pubkey hex).
     Address,
-    /// Create a CSV-locked Taproot mint UTXO on L1.
+    /// Derive a fresh CSV-locked Taproot deposit address. Does not
+    /// broadcast; the user funds it from their own L1 wallet.
     MintUtxo(MintUtxoArgs),
     /// List recorded mint UTXOs.
     ListMints,
-    /// Submit a mint message to the sequencer for a previously created UTXO.
+    /// Poll Esplora for a funding UTXO at a recorded mint's deposit
+    /// address. Updates the wallet's local MintRecord with the
+    /// observed outpoint + value + height.
+    MintWatch(MintWatchArgs),
+    /// Submit a mint message to the sequencer for a previously
+    /// funded mint UTXO.
     MintMessage(MintMessageArgs),
     /// Send an L2 transfer.
     Transfer(TransferArgs),
@@ -71,23 +75,15 @@ enum Cmd {
 struct KeygenArgs {
     #[arg(long)]
     network: String,
-    #[arg(long, default_value = "http://127.0.0.1:18443")]
-    bitcoind_url: String,
-    #[arg(long, conflicts_with_all = ["bitcoind_user", "bitcoind_pass"])]
-    bitcoind_cookie: Option<PathBuf>,
-    #[arg(long, requires = "bitcoind_pass")]
-    bitcoind_user: Option<String>,
-    #[arg(long, requires = "bitcoind_user")]
-    bitcoind_pass: Option<String>,
     #[arg(long, default_value = "http://127.0.0.1:8080")]
     sequencer_url: String,
     #[arg(long)]
     node_url: Option<String>,
-    /// Esplora HTTP base URL for light-client mode (light-head /
-    /// light-balance). Demo points it at hodl-node which exposes a
-    /// slim Esplora-compatible subset.
+    /// Required: Esplora HTTP base URL. The wallet's only L1 data
+    /// source. Point at mempool.space, a self-hosted electrs, or
+    /// hodl-node's slim Esplora-compatible subset.
     #[arg(long)]
-    esplora_url: Option<String>,
+    esplora_url: String,
     /// Overwrite an existing wallet file at the target path.
     #[arg(long)]
     force: bool,
@@ -98,16 +94,21 @@ struct MintUtxoArgs {
     /// Relative locktime T, in blocks (BIP112 CSV). Range: [1, 65535].
     #[arg(long)]
     lock_blocks: u32,
-    /// Value to lock, in BTC.
+}
+
+#[derive(clap::Args, Debug)]
+struct MintWatchArgs {
+    /// BIP32 index of the mint to poll for funding. See `list-mints`.
     #[arg(long)]
-    value_btc: f64,
+    bip32_index: u32,
 }
 
 #[derive(clap::Args, Debug)]
 struct MintMessageArgs {
-    /// "<txid>:<vout>" of a previously created mint UTXO.
+    /// BIP32 index of the (funded) mint. See `list-mints` /
+    /// `mint-watch`.
     #[arg(long)]
-    outpoint: String,
+    bip32_index: u32,
     /// L2 destination x-only pubkey hex. Defaults to our own address.
     #[arg(long)]
     to: Option<String>,
@@ -139,9 +140,9 @@ struct LightBalanceArgs {
 
 #[derive(clap::Args, Debug)]
 struct ReclaimArgs {
-    /// "<txid>:<vout>" of the mint UTXO to reclaim.
+    /// BIP32 index of the mint to reclaim.
     #[arg(long)]
-    outpoint: String,
+    bip32_index: u32,
     /// Destination L1 address.
     #[arg(long)]
     to: String,
@@ -174,6 +175,7 @@ async fn main() -> Result<()> {
         Cmd::Address => cmd_address(wallet),
         Cmd::MintUtxo(args) => cmd_mint_utxo(wallet, args),
         Cmd::ListMints => cmd_list_mints(wallet),
+        Cmd::MintWatch(args) => cmd_mint_watch(wallet, args).await,
         Cmd::MintMessage(args) => cmd_mint_message(wallet, args).await,
         Cmd::Transfer(args) => cmd_transfer(wallet, args).await,
         Cmd::Balance(args) => cmd_balance(wallet, args).await,
@@ -181,29 +183,17 @@ async fn main() -> Result<()> {
         Cmd::Head => cmd_head(wallet).await,
         Cmd::LightHead => cmd_light_head(wallet).await,
         Cmd::LightBalance(args) => cmd_light_balance(wallet, args).await,
-        Cmd::ReclaimList => cmd_reclaim_list(wallet),
-        Cmd::Reclaim(args) => cmd_reclaim(wallet, args),
+        Cmd::ReclaimList => cmd_reclaim_list(wallet).await,
+        Cmd::Reclaim(args) => cmd_reclaim(wallet, args).await,
     }
 }
 
 fn cmd_keygen(wallet_path: &std::path::Path, args: KeygenArgs) -> Result<()> {
     let network = network_from_str(&args.network)?;
-    let auth = match (args.bitcoind_cookie, args.bitcoind_user, args.bitcoind_pass) {
-        (Some(p), None, None) => BitcoindAuth::Cookie { path: p },
-        (None, Some(u), Some(pw)) => BitcoindAuth::UserPass { user: u, password: pw },
-        (None, None, None) => {
-            bail!("specify either --bitcoind-cookie or --bitcoind-user/--bitcoind-pass")
-        }
-        _ => bail!("conflicting bitcoind auth flags"),
-    };
     let out = ops::keygen(
         wallet_path,
         ops::KeygenInput {
             network,
-            bitcoind: BitcoindConfig {
-                url: args.bitcoind_url,
-                auth,
-            },
             sequencer_url: args.sequencer_url,
             node_url: args.node_url,
             esplora_url: args.esplora_url,
@@ -229,18 +219,49 @@ fn cmd_mint_utxo(wallet_path: &std::path::Path, args: MintUtxoArgs) -> Result<()
         wallet_path,
         ops::MintUtxoInput {
             lock_blocks: args.lock_blocks,
-            value_btc: args.value_btc,
         },
     )?;
-    println!("L1 tip: {}", out.l1_tip);
-    println!("relative locktime T: {} blocks", out.lock_blocks);
-    println!("mint address: {}", out.mint_address);
-    println!("sending {} sat ({} BTC)...",
-        out.value_sat,
-        out.value_sat as f64 / 100_000_000.0,
-    );
-    println!("broadcast txid: {}", out.txid);
-    println!("mint outpoint: {}:{}", out.txid, out.vout);
+    println!("mint deposit ready");
+    println!("  bip32_index:        {}", out.bip32_index);
+    println!("  lock_blocks (CSV):  {}", out.lock_blocks);
+    println!("  deposit address:    {}", out.mint_address);
+    println!();
+    println!("send any BTC amount to this address from your normal wallet,");
+    println!("then run `mint-watch --bip32-index {}` to detect funding.", out.bip32_index);
+    Ok(())
+}
+
+async fn cmd_mint_watch(wallet_path: &std::path::Path, args: MintWatchArgs) -> Result<()> {
+    let out = ops::check_mint_funding(
+        wallet_path,
+        ops::CheckMintFundingInput { bip32_index: args.bip32_index },
+    )
+    .await?;
+    println!("mint #{} ({}):", out.bip32_index, out.mint_address);
+    match out.state {
+        MintFundingState::Unfunded => {
+            println!("  status: unfunded (no UTXO at this address yet)");
+        }
+        MintFundingState::Pending => {
+            println!("  status: pending (UTXO seen but unconfirmed)");
+            if let Some(op) = &out.outpoint {
+                println!("  outpoint: {op}");
+            }
+        }
+        MintFundingState::Confirmed => {
+            println!("  status: CONFIRMED");
+            if let Some(op) = &out.outpoint {
+                println!("  outpoint:           {op}");
+            }
+            if let Some(v) = out.value_sat {
+                println!("  value:              {v} sat");
+            }
+            if let Some(h) = out.funded_at_height {
+                println!("  funded at height:   {h}");
+            }
+            println!("  → next: `mint-message --bip32-index {}`", out.bip32_index);
+        }
+    }
     Ok(())
 }
 
@@ -251,10 +272,22 @@ fn cmd_list_mints(wallet_path: &std::path::Path) -> Result<()> {
         return Ok(());
     }
     for m in &mints {
-        let used = if m.minted { "minted" } else { "available" };
+        let funding = match (&m.outpoint, m.value_sat, m.funded_at_height) {
+            (Some(op), Some(v), Some(h)) => format!("funded@{h} {op} v={v}sat"),
+            (Some(op), Some(v), None) => format!("pending {op} v={v}sat"),
+            _ => "unfunded".to_string(),
+        };
+        let tags = [
+            if m.minted { Some("minted") } else { None },
+            if m.reclaimed { Some("reclaimed") } else { None },
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(",");
         println!(
-            "{} v={}sat T={}blocks {}",
-            m.outpoint, m.value_sat, m.lock_blocks, used
+            "#{:>3} T={:>5}b  {}  [{}]  {}",
+            m.bip32_index, m.lock_blocks, m.mint_address, tags, funding
         );
     }
     Ok(())
@@ -265,7 +298,7 @@ async fn cmd_mint_message(wallet_path: &std::path::Path, args: MintMessageArgs) 
     let out = ops::mint_message(
         wallet_path,
         ops::MintMessageInput {
-            outpoint: args.outpoint,
+            bip32_index: args.bip32_index,
             to,
         },
     )
@@ -375,8 +408,8 @@ async fn cmd_light_balance(wallet_path: &std::path::Path, args: LightBalanceArgs
     Ok(())
 }
 
-fn cmd_reclaim_list(wallet_path: &std::path::Path) -> Result<()> {
-    let mints = ops::list_reclaimable_mints(wallet_path)?;
+async fn cmd_reclaim_list(wallet_path: &std::path::Path) -> Result<()> {
+    let mints = ops::list_reclaimable_mints(wallet_path).await?;
     if mints.is_empty() {
         println!("(no recorded mints)");
         return Ok(());
@@ -384,7 +417,7 @@ fn cmd_reclaim_list(wallet_path: &std::path::Path) -> Result<()> {
     for m in &mints {
         let minted_tag = if m.minted { "minted" } else { "no-mint" };
         let status = match m.status {
-            ReclaimStatus::Pending => "pending confirmation".to_string(),
+            ReclaimStatus::Pending => "pending funding".to_string(),
             ReclaimStatus::Locked => format!(
                 "locked: {} block(s) remaining (funded @ {})",
                 m.blocks_remaining.unwrap_or(0),
@@ -396,23 +429,25 @@ fn cmd_reclaim_list(wallet_path: &std::path::Path) -> Result<()> {
             ),
             ReclaimStatus::Reclaimed => "reclaimed".to_string(),
         };
+        let val = m.value_sat.map(|v| format!("{v}sat")).unwrap_or_else(|| "—".to_string());
         println!(
-            "{} v={}sat T={}blocks bip32_idx={} l2={}  ⇒ {}",
-            m.outpoint, m.value_sat, m.lock_blocks, m.bip32_index, minted_tag, status
+            "#{:>3} T={:>5}b v={:>10} l2={}  ⇒ {}",
+            m.bip32_index, m.lock_blocks, val, minted_tag, status
         );
     }
     Ok(())
 }
 
-fn cmd_reclaim(wallet_path: &std::path::Path, args: ReclaimArgs) -> Result<()> {
+async fn cmd_reclaim(wallet_path: &std::path::Path, args: ReclaimArgs) -> Result<()> {
     let out = ops::reclaim_mint(
         wallet_path,
         ops::ReclaimMintInput {
-            outpoint: args.outpoint,
+            bip32_index: args.bip32_index,
             dest_address: args.to,
             fee_sat: args.fee_sat,
         },
-    )?;
+    )
+    .await?;
     println!("broadcast reclaim tx");
     println!("  txid:      {}", out.txid);
     println!("  value in:  {} sat", out.value_sat_in);

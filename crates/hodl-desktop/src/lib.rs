@@ -37,6 +37,7 @@ pub fn run() {
             commands::address,
             commands::list_mints,
             commands::mint_utxo,
+            commands::check_mint_funding,
             commands::mint_message,
             commands::transfer,
             commands::balance,

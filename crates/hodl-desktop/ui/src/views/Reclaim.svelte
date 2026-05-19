@@ -10,7 +10,7 @@
   let result = $state<ReclaimMintOutput | null>(null);
 
   // Active reclaim dialog state. null when no dialog open.
-  let dialog = $state<{ outpoint: string; dest: string; feeSat: number } | null>(
+  let dialog = $state<{ bip32_index: number; mint_address: string; dest: string; feeSat: number } | null>(
     null,
   );
 
@@ -29,7 +29,12 @@
   onMount(refresh);
 
   function openDialog(m: ReclaimableMint) {
-    dialog = { outpoint: m.outpoint, dest: "", feeSat: 1000 };
+    dialog = {
+      bip32_index: m.bip32_index,
+      mint_address: m.mint_address,
+      dest: "",
+      feeSat: 1000,
+    };
   }
 
   function closeDialog() {
@@ -42,7 +47,7 @@
     busy = true;
     try {
       result = await api.reclaimMint({
-        outpoint: dialog.outpoint,
+        bip32_index: dialog.bip32_index,
         dest_address: dialog.dest,
         fee_sat: dialog.feeSat,
       });
@@ -101,15 +106,21 @@
     <p class="muted">no mint UTXOs recorded.</p>
   {:else}
     <ul class="mints">
-      {#each mints as m (m.outpoint)}
+      {#each mints as m (m.bip32_index)}
         <li class="card">
           <div class="spread">
             <div>
               <div>
-                <strong>{m.value_sat} sat</strong>
+                <strong>#{m.bip32_index}</strong>
                 <span class="muted">T={m.lock_blocks} blocks</span>
+                {#if m.value_sat != null}
+                  <span class="muted">· {m.value_sat} sat</span>
+                {/if}
               </div>
-              <div class="muted small mono">{m.outpoint}</div>
+              <div class="muted small mono">{m.mint_address}</div>
+              {#if m.outpoint}
+                <div class="muted small mono">{m.outpoint}</div>
+              {/if}
               <div class="small status-{m.status}">{statusLabel(m)}</div>
             </div>
             <div>
@@ -139,7 +150,8 @@
         role="dialog"
         tabindex="-1"
       >
-        <h3>reclaim {dialog.outpoint}</h3>
+        <h3>reclaim mint #{dialog.bip32_index}</h3>
+        <p class="muted small mono">{dialog.mint_address}</p>
         <div class="field">
           <label for="dest">destination L1 address</label>
           <input

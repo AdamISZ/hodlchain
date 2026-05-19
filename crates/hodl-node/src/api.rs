@@ -42,6 +42,8 @@ pub fn router(state: AppState) -> Router {
         // the L1 attestation chain via standard HTTP without bitcoind.
         .route("/tx/:txid", get(esplora_get_tx))
         .route("/tx/:txid/outspend/:vout", get(esplora_outspend))
+        .route("/tx", axum::routing::post(esplora_broadcast))
+        .route("/address/:addr/utxo", get(esplora_address_utxos))
         .route("/blocks/tip/height", get(esplora_tip_height))
         .with_state(state)
         .merge(SwaggerUi::new("/docs").url("/openapi.json", ApiDoc::openapi()))
@@ -65,6 +67,7 @@ pub fn router(state: AppState) -> Router {
     paths(
         get_head, get_balance, get_block, get_witness, get_nullifiers,
         esplora_get_tx, esplora_outspend, esplora_tip_height,
+        esplora_address_utxos, esplora_broadcast,
     ),
     components(schemas(
         hodl_core::rpc::HeadResponse,
@@ -89,6 +92,7 @@ pub fn router(state: AppState) -> Router {
         EsploraVin,
         EsploraVout,
         EsploraOutspend,
+        EsploraAddressUtxo,
         TxStatus,
     ))
 )]
@@ -270,6 +274,16 @@ pub struct TxStatus {
     pub block_height: Option<u32>,
 }
 
+/// One UTXO at an address, in Esplora's `/address/{addr}/utxo` shape.
+#[derive(Serialize, ToSchema)]
+pub struct EsploraAddressUtxo {
+    pub txid: String,
+    pub vout: u32,
+    /// Value in satoshis.
+    pub value: u64,
+    pub status: TxStatus,
+}
+
 /// Esplora-shape outspend response.
 #[derive(Serialize, ToSchema)]
 pub struct EsploraOutspend {
@@ -384,4 +398,73 @@ async fn esplora_outspend(
             block_height: None,
         },
     }))
+}
+
+#[utoipa::path(
+    get,
+    path = "/address/{addr}/utxo",
+    params(
+        ("addr" = String, Path, description = "L1 address to look up unspent outputs for"),
+    ),
+    responses(
+        (status = 200, description = "Unspent outputs at the address (confirmed only)", body = Vec<EsploraAddressUtxo>),
+    ),
+    tag = "Esplora",
+)]
+async fn esplora_address_utxos(
+    State(app): State<AppState>,
+    Path(addr): Path<String>,
+) -> Result<Json<Vec<EsploraAddressUtxo>>, ApiError> {
+    let l1 = app.l1.clone();
+    let addr_for_scan = addr.clone();
+    let utxos = tokio::task::spawn_blocking(move || l1.scan_address_utxos(&addr_for_scan))
+        .await
+        .map_err(|e| ApiError(anyhow::anyhow!("join: {e}")))??;
+    let out: Vec<EsploraAddressUtxo> = utxos
+        .into_iter()
+        .map(|u| EsploraAddressUtxo {
+            txid: u.txid,
+            vout: u.vout,
+            value: u.value_sat,
+            status: TxStatus {
+                confirmed: u.block_height.is_some(),
+                block_height: u.block_height,
+            },
+        })
+        .collect();
+    Ok(Json(out))
+}
+
+#[utoipa::path(
+    post,
+    path = "/tx",
+    request_body(
+        description = "Hex-encoded raw transaction",
+        content_type = "text/plain",
+        content = String,
+    ),
+    responses(
+        (status = 200, description = "Txid of the broadcast tx", body = String),
+        (status = 400, description = "Hex decode or broadcast failure"),
+    ),
+    tag = "Esplora",
+)]
+async fn esplora_broadcast(
+    State(app): State<AppState>,
+    body: String,
+) -> Result<Response, ApiError> {
+    let raw = match hex::decode(body.trim()) {
+        Ok(b) => b,
+        Err(e) => {
+            return Ok((StatusCode::BAD_REQUEST, format!("hex decode: {e}")).into_response());
+        }
+    };
+    let l1 = app.l1.clone();
+    let result = tokio::task::spawn_blocking(move || l1.send_raw_transaction(&raw))
+        .await
+        .map_err(|e| ApiError(anyhow::anyhow!("join: {e}")))?;
+    match result {
+        Ok(txid) => Ok(txid.to_string().into_response()),
+        Err(e) => Ok((StatusCode::BAD_REQUEST, e.to_string()).into_response()),
+    }
 }

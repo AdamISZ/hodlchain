@@ -1,17 +1,13 @@
 <script lang="ts">
   import * as api from "../lib/api";
   import { go } from "../lib/state.svelte";
-  import type { Network, BitcoindAuth } from "../lib/types";
+  import type { Network } from "../lib/types";
 
-  // Form fields. Pre-filled with the demo's regtest defaults so
-  // the user can hit Create immediately if they're running the
-  // regtest demo locally.
+  // Form fields. Pre-filled with the regtest demo's endpoints so a
+  // user running `scripts/regtest-demo.sh --keep-running` can hit
+  // Create immediately. For production use, the user would point
+  // these at their own sequencer, node, and Esplora (or mempool.space).
   let network = $state<Network>("regtest");
-  let bitcoindUrl = $state("http://127.0.0.1:28443");
-  let authKind = $state<"cookie" | "user_pass">("cookie");
-  let cookiePath = $state("/tmp/hodl-regtest/bitcoin/regtest/.cookie");
-  let user = $state("");
-  let password = $state("");
   let sequencerUrl = $state("http://127.0.0.1:28080");
   let nodeUrl = $state("http://127.0.0.1:28081");
   let esploraUrl = $state("http://127.0.0.1:28081");
@@ -25,16 +21,11 @@
     err = null;
     busy = true;
     try {
-      const auth: BitcoindAuth =
-        authKind === "cookie"
-          ? { kind: "cookie", path: cookiePath }
-          : { kind: "user_pass", user, password };
       const out = await api.keygen({
         network,
-        bitcoind: { url: bitcoindUrl, auth },
         sequencer_url: sequencerUrl,
         node_url: nodeUrl || null,
-        esplora_url: esploraUrl || null,
+        esplora_url: esploraUrl,
         force: false,
       });
       mnemonic = out.mnemonic;
@@ -57,7 +48,9 @@
   {#if mnemonic === null}
     <p class="muted">
       Set up a fresh wallet. A BIP39 mnemonic will be generated and
-      stored in your config directory.
+      stored in your config directory. Your L1 BTC stays in whatever
+      Bitcoin wallet you already use — this app only needs an Esplora
+      endpoint to watch addresses on chain.
     </p>
 
     {#if err}
@@ -76,35 +69,6 @@
       </div>
 
       <div class="field">
-        <label for="bitcoind-url">bitcoind RPC URL</label>
-        <input id="bitcoind-url" type="url" bind:value={bitcoindUrl} />
-      </div>
-
-      <div class="field">
-        <label for="auth-kind">bitcoind auth</label>
-        <select id="auth-kind" bind:value={authKind}>
-          <option value="cookie">cookie file</option>
-          <option value="user_pass">user / password</option>
-        </select>
-      </div>
-
-      {#if authKind === "cookie"}
-        <div class="field">
-          <label for="cookie">cookie path</label>
-          <input id="cookie" type="text" bind:value={cookiePath} />
-        </div>
-      {:else}
-        <div class="field">
-          <label for="user">user</label>
-          <input id="user" type="text" bind:value={user} />
-        </div>
-        <div class="field">
-          <label for="password">password</label>
-          <input id="password" type="password" bind:value={password} />
-        </div>
-      {/if}
-
-      <div class="field">
         <label for="seq-url">sequencer URL</label>
         <input id="seq-url" type="url" bind:value={sequencerUrl} />
       </div>
@@ -115,8 +79,12 @@
       </div>
 
       <div class="field">
-        <label for="esplora-url">esplora URL <span class="muted">(optional, light-balance)</span></label>
+        <label for="esplora-url">esplora URL</label>
         <input id="esplora-url" type="url" bind:value={esploraUrl} />
+        <small class="muted">
+          mempool.space / electrs / hodl-node — anything that speaks
+          the standard Esplora HTTP API. Required.
+        </small>
       </div>
 
       <div class="row">

@@ -1,21 +1,23 @@
-//! Esplora-compatible HTTP client for chain-walking the hodlcoin L1
-//! attestation chain and for the light client's direct verification
-//! pass.
+//! Esplora-compatible HTTP client for the L1 side of the wallet.
 //!
-//! Uses these endpoints from the Esplora HTTP API:
+//! The wallet talks to L1 *exclusively* through this surface — no
+//! bitcoind RPC, no wallet-scoped calls. In production this points at
+//! a real Esplora deployment (mempool.space, BlockStream's electrs)
+//! or the user's own electrs / mempool-space-self-host instance.
+//! In the demo it points at `hodl-node`, which exposes a slim
+//! Esplora-compatible subset on top of bitcoind.
 //!
-//!   GET /tx/:txid                    — tx info (vin + vout + status)
-//!   GET /tx/:txid/outspend/:vout     — "is this outpoint spent? by whom?"
-//!   GET /blocks/tip/height           — current L1 tip height
+//! Endpoints we consume:
 //!
-//! Real Esplora deployments (mempool.space, BlockStream's electrs)
-//! return richer JSON than we deserialise here; that's fine, serde
-//! ignores extras. Our `hodl-node` exposes the same endpoints with
-//! the slim shape these structs expect, so the demo works against the
-//! node without an external Esplora.
+//!   GET  /tx/{txid}                    — tx info (vin + vout + status)
+//!   GET  /tx/{txid}/outspend/{vout}    — "is this outpoint spent? by whom?"
+//!   GET  /address/{addr}/utxo          — current UTXOs at a P2TR address
+//!   GET  /blocks/tip/height            — current L1 tip height
+//!   POST /tx                           — broadcast a raw signed tx
 
 use anyhow::{anyhow, bail, Context, Result};
-use bitcoin::{OutPoint, ScriptBuf, Txid};
+use bitcoin::consensus::encode::serialize_hex;
+use bitcoin::{Address, OutPoint, ScriptBuf, Transaction, Txid};
 use hodl_core::op_return::Attestation;
 use reqwest::Client;
 use serde::Deserialize;
@@ -36,7 +38,7 @@ pub struct EsploraTx {
     pub status: TxStatus,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize)]
 pub struct TxStatus {
     /// L1 height at which the tx was mined; `None` for unconfirmed.
     /// We don't read `status.confirmed` separately — `block_height
@@ -119,6 +121,52 @@ impl EsploraClient {
         body.trim().parse::<u32>()
             .with_context(|| format!("parse tip height from {url}: {body:?}"))
     }
+
+    /// UTXOs currently held at `addr`. Used by the wallet to discover
+    /// the funding tx for a mint UTXO that the user paid into from
+    /// their external wallet.
+    pub async fn address_utxos(&self, addr: &Address) -> Result<Vec<AddressUtxo>> {
+        let url = format!(
+            "{}/address/{}/utxo",
+            self.base.trim_end_matches('/'),
+            addr
+        );
+        let resp = self.http.get(&url).send().await
+            .with_context(|| format!("GET {url}"))?;
+        if !resp.status().is_success() {
+            bail!("{url} returned HTTP {}", resp.status());
+        }
+        Ok(resp.json::<Vec<AddressUtxo>>().await
+            .with_context(|| format!("decode AddressUtxo list from {url}"))?)
+    }
+
+    /// Broadcast a signed transaction. Esplora's POST /tx takes a
+    /// hex-encoded raw tx as the request body and returns the txid
+    /// as plain text on success.
+    pub async fn broadcast(&self, tx: &Transaction) -> Result<Txid> {
+        let url = format!("{}/tx", self.base.trim_end_matches('/'));
+        let body = serialize_hex(tx);
+        let resp = self.http.post(&url).body(body).send().await
+            .with_context(|| format!("POST {url}"))?;
+        let status = resp.status();
+        let text = resp.text().await
+            .with_context(|| format!("read {url} body"))?;
+        if !status.is_success() {
+            bail!("{url} returned HTTP {status}: {}", text.trim());
+        }
+        Txid::from_str(text.trim())
+            .with_context(|| format!("parse txid from {url}: {text:?}"))
+    }
+}
+
+/// One UTXO returned by Esplora's `/address/{addr}/utxo` endpoint.
+#[derive(Clone, Debug, Deserialize)]
+pub struct AddressUtxo {
+    pub txid: Txid,
+    pub vout: u32,
+    pub value: u64,
+    #[serde(default)]
+    pub status: TxStatus,
 }
 
 /// One step of the attestation chain.

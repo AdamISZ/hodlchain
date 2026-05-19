@@ -9,6 +9,8 @@ import type {
   MintRecord,
   MintUtxoInput,
   MintUtxoOutput,
+  CheckMintFundingInput,
+  CheckMintFundingOutput,
   MintMessageInput,
   MintMessageOutput,
   TransferInput,
@@ -41,6 +43,10 @@ export const listMints = (): Promise<MintRecord[]> => invoke("list_mints");
 
 export const mintUtxo = (input: MintUtxoInput): Promise<MintUtxoOutput> =>
   invoke("mint_utxo", { input });
+
+export const checkMintFunding = (
+  input: CheckMintFundingInput,
+): Promise<CheckMintFundingOutput> => invoke("check_mint_funding", { input });
 
 export const mintMessage = (
   input: MintMessageInput,

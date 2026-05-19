@@ -16,7 +16,6 @@
 //!   - `ops`       — typed UI-agnostic operation surface (the public API).
 
 pub mod api;
-pub mod bitcoind;
 pub mod esplora;
 pub mod ops;
 pub mod reclaim;

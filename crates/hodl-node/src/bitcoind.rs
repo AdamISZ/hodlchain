@@ -14,6 +14,18 @@ pub struct NodeL1 {
     client: Mutex<Client>,
 }
 
+/// One UTXO at an address, as exposed by the node's
+/// Esplora-compatible /address/{addr}/utxo endpoint.
+#[derive(Clone, Debug)]
+pub struct AddressUtxo {
+    pub txid: String,
+    pub vout: u32,
+    pub value_sat: u64,
+    /// L1 confirmation height. Always Some for results from
+    /// scantxoutset (which only scans confirmed state).
+    pub block_height: Option<u32>,
+}
+
 #[derive(Clone, Debug)]
 pub struct ChainAdvance {
     pub attestation: Attestation,
@@ -60,6 +72,60 @@ impl NodeL1 {
             _ => None,
         };
         Ok((tx, height))
+    }
+
+    /// Scan the chain's UTXO set for unspent outputs paying to `addr`.
+    /// Backed by bitcoind's `scantxoutset` — wallet-free, slow on
+    /// mainnet, fine for regtest. Returns confirmed UTXOs only; the
+    /// mempool isn't included (matches what an electrs deployment
+    /// would return for a fresh wallet).
+    pub fn scan_address_utxos(&self, addr: &str) -> Result<Vec<AddressUtxo>> {
+        use serde_json::json;
+        let c = self.client.lock().unwrap();
+        let result: serde_json::Value = c
+            .call(
+                "scantxoutset",
+                &[json!("start"), json!([format!("addr({})", addr)])],
+            )
+            .context("scantxoutset RPC")?;
+        if !result.get("success").and_then(|v| v.as_bool()).unwrap_or(false) {
+            bail!("scantxoutset returned success=false: {result}");
+        }
+        let unspents = result
+            .get("unspents")
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| anyhow!("scantxoutset response missing 'unspents'"))?;
+        let mut out = Vec::with_capacity(unspents.len());
+        for u in unspents {
+            let txid_s = u
+                .get("txid")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow!("unspent missing txid"))?;
+            let vout = u
+                .get("vout")
+                .and_then(|v| v.as_u64())
+                .ok_or_else(|| anyhow!("unspent missing vout"))? as u32;
+            // `amount` is in BTC; convert to sats.
+            let amount_btc = u
+                .get("amount")
+                .and_then(|v| v.as_f64())
+                .ok_or_else(|| anyhow!("unspent missing amount"))?;
+            let value_sat = (amount_btc * 100_000_000.0).round() as u64;
+            let height = u.get("height").and_then(|v| v.as_u64()).map(|h| h as u32);
+            out.push(AddressUtxo {
+                txid: txid_s.to_string(),
+                vout,
+                value_sat,
+                block_height: height,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Broadcast a signed transaction. Wallet-free.
+    pub fn send_raw_transaction(&self, raw: &[u8]) -> Result<Txid> {
+        let c = self.client.lock().unwrap();
+        Ok(c.send_raw_transaction(raw)?)
     }
 
     /// Walk every tx in L1 block `h` looking for one that spends

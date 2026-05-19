@@ -1,32 +1,77 @@
 <script lang="ts">
+  import { onDestroy } from "svelte";
   import * as api from "../lib/api";
-  import type { MintUtxoOutput, MintMessageOutput } from "../lib/types";
+  import type {
+    MintUtxoOutput,
+    CheckMintFundingOutput,
+    MintMessageOutput,
+  } from "../lib/types";
   import { go } from "../lib/state.svelte";
 
-  // The mint flow has two on-chain steps: (1) create the funded
-  // CSV-locked UTXO, (2) once it's confirmed, submit the mint message
-  // to the sequencer. We split the UI into clear stages so the user
-  // can see what's happening and resume later if they leave.
+  // Three-stage flow:
+  //
+  //   1. form     — user picks lock_blocks, clicks "derive deposit
+  //                 address". hodl-wallet derives a fresh BIP32 key
+  //                 and shows the resulting bech32m address.
+  //   2. funding  — user is asked to send BTC from their normal
+  //                 wallet. We poll Esplora periodically until a
+  //                 confirmed UTXO appears.
+  //   3. mint     — once funded, user clicks "submit mint message"
+  //                 to credit the L2 tokens.
 
-  type Stage = "form" | "broadcasted" | "submitted";
+  type Stage = "form" | "funding" | "mint" | "done";
 
   let stage = $state<Stage>("form");
   let lockBlocks = $state(10000);
-  let valueBtc = $state(0.1);
 
   let busy = $state(false);
   let err = $state<string | null>(null);
   let utxo = $state<MintUtxoOutput | null>(null);
+  let funding = $state<CheckMintFundingOutput | null>(null);
   let msg = $state<MintMessageOutput | null>(null);
 
-  async function createUtxo() {
+  let pollTimer: ReturnType<typeof setInterval> | null = null;
+
+  onDestroy(() => {
+    if (pollTimer !== null) clearInterval(pollTimer);
+  });
+
+  async function deriveAddress() {
     err = null;
     busy = true;
     try {
-      utxo = await api.mintUtxo({ lock_blocks: lockBlocks, value_btc: valueBtc });
-      stage = "broadcasted";
+      utxo = await api.mintUtxo({ lock_blocks: lockBlocks });
+      stage = "funding";
+      // Kick off a poll right away, then every 5s.
+      void poll();
+      pollTimer = setInterval(() => void poll(), 5000);
     } catch (e) {
       err = String(e);
+    } finally {
+      busy = false;
+    }
+  }
+
+  async function poll() {
+    if (!utxo) return;
+    try {
+      funding = await api.checkMintFunding({ bip32_index: utxo.bip32_index });
+      if (funding.state === "confirmed") {
+        if (pollTimer !== null) {
+          clearInterval(pollTimer);
+          pollTimer = null;
+        }
+        stage = "mint";
+      }
+    } catch (e) {
+      err = String(e);
+    }
+  }
+
+  async function pollNow() {
+    busy = true;
+    try {
+      await poll();
     } finally {
       busy = false;
     }
@@ -37,11 +82,8 @@
     err = null;
     busy = true;
     try {
-      msg = await api.mintMessage({
-        outpoint: `${utxo.txid}:${utxo.vout}`,
-        to: null,
-      });
-      stage = "submitted";
+      msg = await api.mintMessage({ bip32_index: utxo.bip32_index, to: null });
+      stage = "done";
     } catch (e) {
       err = String(e);
     } finally {
@@ -79,51 +121,64 @@
         />
         <small class="muted">BIP112 range: 1 .. 65535 blocks</small>
       </div>
-      <div class="field">
-        <label for="value">amount (BTC)</label>
-        <input
-          id="value"
-          type="number"
-          min="0.00000001"
-          step="0.00000001"
-          bind:value={valueBtc}
-        />
-      </div>
       <div>
-        <button class="primary" disabled={busy} onclick={createUtxo}>
-          {busy ? "broadcasting…" : "create deposit UTXO"}
+        <button class="primary" disabled={busy} onclick={deriveAddress}>
+          {busy ? "deriving…" : "derive deposit address"}
         </button>
       </div>
     </div>
-  {:else if stage === "broadcasted" && utxo}
+  {:else if stage === "funding" && utxo}
     <div class="card stack">
       <p>
-        ✓ deposit transaction broadcast. Wait for it to confirm before
-        submitting the mint message.
+        Send any BTC amount to this address from your normal wallet:
       </p>
+      <div class="deposit mono">{utxo.mint_address}</div>
       <dl>
-        <dt>txid</dt>
-        <dd class="mono small">{utxo.txid}</dd>
-        <dt>outpoint</dt>
-        <dd class="mono small">{utxo.txid}:{utxo.vout}</dd>
-        <dt>mint address (informational)</dt>
-        <dd class="mono small">{utxo.mint_address}</dd>
-        <dt>value</dt>
-        <dd>{utxo.value_sat} sat</dd>
+        <dt>bip32_index</dt>
+        <dd>{utxo.bip32_index}</dd>
         <dt>lock</dt>
         <dd>{utxo.lock_blocks} L1 blocks</dd>
+        <dt>funding status</dt>
+        <dd>
+          {#if !funding || funding.state === "unfunded"}
+            no UTXO observed yet
+          {:else if funding.state === "pending"}
+            UTXO seen in mempool, waiting for 1 confirmation
+          {:else}
+            confirmed
+          {/if}
+        </dd>
       </dl>
       <p class="muted">
-        Once the funding tx has 1 confirmation, click below to submit
-        the mint message and credit the L2 tokens.
+        The app polls the configured Esplora endpoint every 5 seconds.
+        You can also re-check manually.
       </p>
+      <div class="row">
+        <button onclick={pollNow} disabled={busy}>
+          {busy ? "checking…" : "check now"}
+        </button>
+      </div>
+    </div>
+  {:else if stage === "mint" && utxo && funding}
+    <div class="card stack">
+      <p>
+        <span class="success">✓ deposit confirmed</span> at L1 height
+        {funding.funded_at_height}. Submit the mint message to credit
+        your L2 tokens.
+      </p>
+      <dl>
+        <dt>outpoint</dt>
+        <dd class="mono small">{funding.outpoint}</dd>
+        <dt>value</dt>
+        <dd>{funding.value_sat} sat</dd>
+      </dl>
       <div>
         <button class="primary" disabled={busy} onclick={submitMessage}>
           {busy ? "submitting…" : "submit mint message"}
         </button>
       </div>
     </div>
-  {:else if stage === "submitted" && msg}
+  {:else if stage === "done" && msg}
     <div class="card stack">
       {#if msg.accepted}
         <p>
@@ -170,6 +225,15 @@
     display: flex;
     flex-direction: column;
     gap: var(--space-4);
+  }
+  .deposit {
+    background: #fef3c7;
+    border: 1px solid #fcd34d;
+    padding: var(--space-3);
+    border-radius: var(--radius);
+    font-size: 0.95rem;
+    word-break: break-all;
+    user-select: all;
   }
   dl {
     display: grid;

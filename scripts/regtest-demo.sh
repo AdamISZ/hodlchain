@@ -89,6 +89,35 @@ require_path cargo
 [ -x "$BITCOIND_BIN" ]     || { echo "bitcoind not found (looked at \$PATH and $BITCOIND_PREFIX); set BITCOIND_BIN or BITCOIND_PREFIX"; exit 1; }
 [ -x "$BITCOIN_CLI_BIN" ]  || { echo "bitcoin-cli not found (looked at \$PATH and $BITCOIND_PREFIX); set BITCOIN_CLI_BIN or BITCOIND_PREFIX"; exit 1; }
 
+# --- Preflight: ports must be free -----------------------------------------
+#
+# Leftover daemons from a previous run (or an unrelated process) bound
+# to one of our ports cause confusing downstream errors (bitcoind
+# "Could not locate RPC credentials" because its bind failed silently;
+# sequencer/node refusing to start). Catch them here with a clear
+# message instead.
+
+check_port_free() {
+    local port="$1" name="$2"
+    if command -v ss >/dev/null 2>&1 && \
+       ss -tln 2>/dev/null | awk '{print $4}' | grep -qE "[:.]${port}$"; then
+        local owner=""
+        if ss -tlnp 2>/dev/null | grep -qE "[:.]${port}[[:space:]]"; then
+            owner=$(ss -tlnp 2>/dev/null \
+                | awk -v p="${port}" '$4 ~ ("[:.]"p"$") { print $NF; exit }')
+        fi
+        echo "port $port ($name) is already bound${owner:+ by $owner}." >&2
+        echo "kill the process then retry, e.g. via \`fuser -k ${port}/tcp\`." >&2
+        return 1
+    fi
+}
+
+PORTS_OK=1
+check_port_free "$BTC_RPC"  "bitcoind RPC" || PORTS_OK=0
+check_port_free "$SEQ_PORT" "hodl-sequencer HTTP" || PORTS_OK=0
+check_port_free "$NODE_PORT" "hodl-node HTTP" || PORTS_OK=0
+[ "$PORTS_OK" -eq 1 ] || exit 1
+
 # --- Cleanup trap ----------------------------------------------------------
 
 PIDS=()
@@ -142,13 +171,26 @@ say "starting bitcoind in regtest mode ($BITCOIND_BIN)"
 BITCOIND_RUNNING=1
 
 COOKIE="$DATA_DIR/bitcoin/regtest/.cookie"
-for _ in {1..30}; do
+# Bump to ~30s and fail loudly. Previous 9s timeout would silently
+# fall through and let the next bitcoin-cli call hit an unready
+# daemon, producing the confusing "Could not locate RPC credentials"
+# error.
+READY=0
+for _ in {1..150}; do
     if [ -f "$COOKIE" ] && "$BITCOIN_CLI_BIN" -datadir="$DATA_DIR/bitcoin" -regtest getblockcount >/dev/null 2>&1; then
         ok "bitcoind RPC ready"
+        READY=1
         break
     fi
-    sleep 0.3
+    sleep 0.2
 done
+if [ "$READY" -ne 1 ]; then
+    echo "ERROR: bitcoind did not become RPC-ready within 30s." >&2
+    echo "  cookie path: $COOKIE" >&2
+    echo "  is another bitcoind already bound to port $BTC_RPC?" >&2
+    echo "  inspect $DATA_DIR/bitcoin/regtest/debug.log for clues." >&2
+    exit 1
+fi
 
 btc()      { "$BITCOIN_CLI_BIN" -datadir="$DATA_DIR/bitcoin" -regtest "$@"; }
 btc_user() { "$BITCOIN_CLI_BIN" -datadir="$DATA_DIR/bitcoin" -regtest -rpcwallet=user "$@"; }
@@ -240,18 +282,15 @@ BOB_WALLET="$DATA_DIR/wallet/bob.json"
 say "keygen Alice & Bob"
 "$WALLET_BIN" --wallet "$ALICE_WALLET" keygen \
     --network regtest \
-    --bitcoind-url "http://127.0.0.1:$BTC_RPC/wallet/user" \
-    --bitcoind-cookie "$COOKIE" \
     --sequencer-url "http://127.0.0.1:$SEQ_PORT" \
     --node-url "http://127.0.0.1:$NODE_PORT" \
     --esplora-url "http://127.0.0.1:$NODE_PORT" \
     | sed 's/^/    /'
 "$WALLET_BIN" --wallet "$BOB_WALLET" keygen \
     --network regtest \
-    --bitcoind-url "http://127.0.0.1:$BTC_RPC/wallet/user" \
-    --bitcoind-cookie "$COOKIE" \
     --sequencer-url "http://127.0.0.1:$SEQ_PORT" \
     --node-url "http://127.0.0.1:$NODE_PORT" \
+    --esplora-url "http://127.0.0.1:$NODE_PORT" \
     | sed 's/^/    /'
 
 ALICE_ADDR=$("$WALLET_BIN" --wallet "$ALICE_WALLET" address)
@@ -259,23 +298,36 @@ BOB_ADDR=$("$WALLET_BIN" --wallet "$BOB_WALLET" address)
 dim "alice L2 address: $ALICE_ADDR"
 dim "bob   L2 address: $BOB_ADDR"
 
-# --- Step 1: Alice creates a CSV-locked mint UTXO --------------------------
+# --- Step 1: Alice gets a CSV-locked deposit address from her wallet -------
 
-say "alice creates a CSV-locked mint UTXO (T=10000 blocks ≈ 70 days, V=0.1 BTC)"
-"$WALLET_BIN" --wallet "$ALICE_WALLET" mint-utxo \
-    --lock-blocks 10000 --value-btc 0.1 | sed 's/^/    /'
+say "alice derives a deposit address (T=10000 blocks ≈ 70 days)"
+ALICE_MINT_OUT=$("$WALLET_BIN" --wallet "$ALICE_WALLET" mint-utxo --lock-blocks 10000)
+echo "$ALICE_MINT_OUT" | sed 's/^/    /'
+ALICE_DEPOSIT_ADDR=$(echo "$ALICE_MINT_OUT" | grep 'deposit address:' | awk '{print $3}')
+dim "captured deposit address: $ALICE_DEPOSIT_ADDR"
 
+# --- Step 2: Alice funds the deposit from her bitcoin wallet ---------------
+#
+# In production this is the user's normal wallet (Sparrow, Electrum,
+# hardware wallet, exchange withdrawal, …). The hodl-wallet app does
+# not touch the user's L1 funds. Here, bitcoin-cli on the `user`
+# wallet stands in for "Alice's bitcoin wallet".
+
+say "alice's bitcoin wallet sends 0.1 BTC to the deposit address"
+btc_user sendtoaddress "$ALICE_DEPOSIT_ADDR" 0.1 >/dev/null
 btc generatetoaddress 1 "$USER_ADDR" >/dev/null
-ok "mined 1 block — funding UTXO confirmed"
+ok "mined 1 block — funding tx confirmed"
 
-OUTPOINT=$("$WALLET_BIN" --wallet "$ALICE_WALLET" list-mints | head -1 | awk '{print $1}')
-dim "outpoint: $OUTPOINT"
+# --- Step 3: hodl-wallet observes the funding via Esplora ------------------
 
-# --- Step 2: Alice submits the mint message --------------------------------
+say "hodl-wallet polls Esplora for the funding UTXO"
+"$WALLET_BIN" --wallet "$ALICE_WALLET" mint-watch --bip32-index 0 | sed 's/^/    /'
+
+# --- Step 4: Alice submits the mint message --------------------------------
 
 say "alice submits mint message"
 "$WALLET_BIN" --wallet "$ALICE_WALLET" mint-message \
-    --outpoint "$OUTPOINT" | sed 's/^/    /'
+    --bip32-index 0 | sed 's/^/    /'
 
 # --- Step 3: drive L1 forward so sequencer produces + attestation lands ----
 
@@ -387,13 +439,20 @@ say "light-client balance for alice (warm-start: incremental sparse walk)"
 # submitted a mint message.
 
 SHORT_LOCK=10
-say "alice creates a short-lock mint UTXO (T=$SHORT_LOCK blocks, V=0.05 BTC) for the reclaim demo"
-"$WALLET_BIN" --wallet "$ALICE_WALLET" mint-utxo \
-    --lock-blocks "$SHORT_LOCK" --value-btc 0.05 | sed 's/^/    /'
+say "alice derives a short-lock deposit address (T=$SHORT_LOCK blocks) for the reclaim demo"
+SHORT_MINT_OUT=$("$WALLET_BIN" --wallet "$ALICE_WALLET" mint-utxo --lock-blocks "$SHORT_LOCK")
+echo "$SHORT_MINT_OUT" | sed 's/^/    /'
+SHORT_DEPOSIT_ADDR=$(echo "$SHORT_MINT_OUT" | grep 'deposit address:' | awk '{print $3}')
+SHORT_INDEX=$(echo "$SHORT_MINT_OUT" | grep 'bip32_index:' | awk '{print $2}')
+dim "short-lock deposit address: $SHORT_DEPOSIT_ADDR  (bip32_index=$SHORT_INDEX)"
+
+say "alice's bitcoin wallet sends 0.05 BTC to the short-lock deposit address"
+btc_user sendtoaddress "$SHORT_DEPOSIT_ADDR" 0.05 >/dev/null
 btc generatetoaddress 1 "$USER_ADDR" >/dev/null
 sleep 0.5
-SHORT_OUTPOINT=$("$WALLET_BIN" --wallet "$ALICE_WALLET" list-mints | tail -1 | awk '{print $1}')
-dim "short-lock outpoint: $SHORT_OUTPOINT"
+
+say "hodl-wallet polls Esplora for the short-lock funding"
+"$WALLET_BIN" --wallet "$ALICE_WALLET" mint-watch --bip32-index "$SHORT_INDEX" | sed 's/^/    /'
 
 say "reclaim-list before CSV maturity (expect: 'locked: N blocks remaining')"
 "$WALLET_BIN" --wallet "$ALICE_WALLET" reclaim-list | sed 's/^/    /'
@@ -410,7 +469,7 @@ say "reclaim-list after maturity (expect: 'READY')"
 DEST_ADDR=$(btc_user getnewaddress)
 say "reclaim the short-lock mint to $DEST_ADDR"
 "$WALLET_BIN" --wallet "$ALICE_WALLET" reclaim \
-    --outpoint "$SHORT_OUTPOINT" --to "$DEST_ADDR" | sed 's/^/    /'
+    --bip32-index "$SHORT_INDEX" --to "$DEST_ADDR" | sed 's/^/    /'
 btc generatetoaddress 1 "$USER_ADDR" >/dev/null
 sleep 0.5
 

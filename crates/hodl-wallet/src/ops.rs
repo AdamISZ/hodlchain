@@ -18,10 +18,10 @@
 use anyhow::{anyhow, bail, Context, Result};
 use bip39::Mnemonic;
 use bitcoin::secp256k1::{Message, Secp256k1, XOnlyPublicKey};
-use bitcoin::{Address, Amount, OutPoint, Txid};
+use bitcoin::{Address, OutPoint, Txid};
 use hodl_core::consensus::MAX_LOCK_BLOCKS;
 use hodl_core::hash::H256;
-use hodl_core::l1::{derive_mint_taproot, mint_address};
+use hodl_core::l1::mint_address;
 use hodl_core::proof::{MintProofEnvelope, OutpointProof};
 use hodl_core::rpc::HeadResponse;
 use hodl_core::smt::LeafKind;
@@ -32,23 +32,21 @@ use std::path::Path;
 use std::str::FromStr;
 
 use crate::api::ApiClient;
-use crate::bitcoind::Bitcoind;
 use crate::esplora::{self, EsploraClient};
 use crate::reclaim;
 use crate::verify;
-use crate::wallet::{
-    parse_outpoint, BitcoindConfig, MintRecord, NetworkName, WalletFile,
-};
+use crate::wallet::{parse_outpoint, MintRecord, NetworkName, WalletFile};
 
 // ---------- Keygen ----------
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct KeygenInput {
     pub network: NetworkName,
-    pub bitcoind: BitcoindConfig,
     pub sequencer_url: String,
     pub node_url: Option<String>,
-    pub esplora_url: Option<String>,
+    /// Required: Esplora HTTP base URL. The wallet's only L1 data
+    /// source.
+    pub esplora_url: String,
     pub force: bool,
 }
 
@@ -75,7 +73,6 @@ pub fn keygen(wallet_path: &Path, input: KeygenInput) -> Result<KeygenOutput> {
     let wf = WalletFile {
         network: input.network,
         mnemonic: phrase.clone(),
-        bitcoind: input.bitcoind,
         sequencer_url: input.sequencer_url,
         node_url: input.node_url,
         esplora_url: input.esplora_url,
@@ -99,22 +96,25 @@ pub fn address(wallet_path: &Path) -> Result<XOnlyPublicKey> {
     wf.xonly_pubkey(&secp)
 }
 
-// ---------- Mint UTXO ----------
+// ---------- Mint UTXO: derive deposit address ----------
+//
+// The wallet does *not* construct or broadcast a funding tx. We just
+// derive a fresh L1 mint key, compute the CSV-locked taproot address,
+// record it, and return it. The user is expected to send BTC to that
+// address from whatever external wallet they actually use (Sparrow,
+// Electrum, hardware-wallet flow, exchange withdrawal, …). Our app
+// then watches the address via `check_mint_funding`.
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct MintUtxoInput {
     pub lock_blocks: u32,
-    pub value_btc: f64,
 }
 
 #[derive(Clone, Debug, Serialize)]
 pub struct MintUtxoOutput {
-    pub l1_tip: u32,
+    pub bip32_index: u32,
     pub lock_blocks: u32,
     pub mint_address: String,
-    pub txid: Txid,
-    pub vout: u32,
-    pub value_sat: u64,
 }
 
 pub fn mint_utxo(wallet_path: &Path, input: MintUtxoInput) -> Result<MintUtxoOutput> {
@@ -126,35 +126,144 @@ pub fn mint_utxo(wallet_path: &Path, input: MintUtxoInput) -> Result<MintUtxoOut
     }
     let mut wf = WalletFile::load(wallet_path)?;
     let secp = Secp256k1::new();
+    let network = wf.network.into_bitcoin();
     // Allocate a fresh BIP32-derived L1 mint key for this mint. Each
     // mint UTXO commits to a different user_pk on chain, so an L1
-    // observer cannot group mints by the same user without
-    // additional analysis.
+    // observer cannot trivially group mints by the same user.
     let (mint_kp, bip32_index) = wf.allocate_mint_keypair(&secp)?;
     let mint_xonly = mint_kp.x_only_public_key().0;
-    let network = wf.network.into_bitcoin();
-    let bd = Bitcoind::connect(&wf.bitcoind)?;
-    let l1_tip = bd.block_count()?;
-    let (spk, _spend) = derive_mint_taproot(&secp, input.lock_blocks, &mint_xonly);
     let address = mint_address(&secp, input.lock_blocks, &mint_xonly, network);
-    let amount = Amount::from_btc(input.value_btc).context("invalid BTC amount")?;
-    let (txid, vout) = bd.send_to_address(&address, amount, &spk)?;
-    wf.upsert_mint(MintRecord {
-        outpoint: format!("{txid}:{vout}"),
-        value_sat: amount.to_sat(),
+
+    wf.append_mint(MintRecord {
+        mint_address: address.to_string(),
         lock_blocks: input.lock_blocks,
         bip32_index,
+        outpoint: None,
+        value_sat: None,
+        funded_at_height: None,
         minted: false,
         reclaimed: false,
     });
     wf.save(wallet_path)?;
     Ok(MintUtxoOutput {
-        l1_tip,
+        bip32_index,
         lock_blocks: input.lock_blocks,
         mint_address: address.to_string(),
-        txid,
-        vout,
-        value_sat: amount.to_sat(),
+    })
+}
+
+// ---------- Check mint funding ----------
+//
+// Polls Esplora's `/address/{mint_address}/utxo` for unspent outputs
+// at a recorded mint's deposit address. The first UTXO found is taken
+// to be the funding tx — addresses are one-shot in our scheme so
+// multiple deposits to the same address are user error and we
+// intentionally lock onto the first one observed.
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct CheckMintFundingInput {
+    pub bip32_index: u32,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MintFundingState {
+    /// No UTXO observed at the mint address yet.
+    Unfunded,
+    /// A UTXO is visible but unconfirmed (mempool only). Most
+    /// Esplora deployments don't return mempool UTXOs at the
+    /// `/address/{addr}/utxo` endpoint, so this state may be
+    /// effectively unreachable depending on the backend.
+    Pending,
+    /// UTXO confirmed; outpoint + value + funded_at_height are now
+    /// persisted on the MintRecord.
+    Confirmed,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct CheckMintFundingOutput {
+    pub bip32_index: u32,
+    pub mint_address: String,
+    pub state: MintFundingState,
+    /// "<txid>:<vout>" once funded.
+    pub outpoint: Option<String>,
+    pub value_sat: Option<u64>,
+    pub funded_at_height: Option<u32>,
+}
+
+pub async fn check_mint_funding(
+    wallet_path: &Path,
+    input: CheckMintFundingInput,
+) -> Result<CheckMintFundingOutput> {
+    let mut wf = WalletFile::load(wallet_path)?;
+    let record = wf
+        .find_mint_by_index(input.bip32_index)
+        .ok_or_else(|| anyhow!("no mint record with bip32_index {}", input.bip32_index))?
+        .clone();
+
+    // If we already have a confirmed outpoint, short-circuit.
+    if record.outpoint.is_some() && record.funded_at_height.is_some() {
+        return Ok(CheckMintFundingOutput {
+            bip32_index: record.bip32_index,
+            mint_address: record.mint_address,
+            state: MintFundingState::Confirmed,
+            outpoint: record.outpoint,
+            value_sat: record.value_sat,
+            funded_at_height: record.funded_at_height,
+        });
+    }
+
+    let esplora = EsploraClient::new(wf.esplora_url.clone());
+    let network = wf.network.into_bitcoin();
+    let address = Address::from_str(&record.mint_address)
+        .context("parse mint_address")?
+        .require_network(network)
+        .with_context(|| format!("mint_address not on network {network:?}"))?;
+    let utxos = esplora.address_utxos(&address).await?;
+
+    if utxos.is_empty() {
+        return Ok(CheckMintFundingOutput {
+            bip32_index: record.bip32_index,
+            mint_address: record.mint_address,
+            state: MintFundingState::Unfunded,
+            outpoint: None,
+            value_sat: None,
+            funded_at_height: None,
+        });
+    }
+
+    // Take the first UTXO. Addresses are one-shot.
+    let u = &utxos[0];
+    let state = if u.status.block_height.is_some() {
+        MintFundingState::Confirmed
+    } else {
+        MintFundingState::Pending
+    };
+
+    // Update the record only when confirmed — the mint_message flow
+    // and the reclaim flow both need a confirmed funded_at_height.
+    let (out_outpoint, out_value, out_height) = if state == MintFundingState::Confirmed {
+        let outpoint_s = format!("{}:{}", u.txid, u.vout);
+        let height = u.status.block_height;
+        let r = wf
+            .find_mint_by_index_mut(input.bip32_index)
+            .expect("record exists; we just read it");
+        r.outpoint = Some(outpoint_s.clone());
+        r.value_sat = Some(u.value);
+        r.funded_at_height = height;
+        wf.save(wallet_path)?;
+        (Some(outpoint_s), Some(u.value), height)
+    } else {
+        (Some(format!("{}:{}", u.txid, u.vout)), Some(u.value), None)
+    };
+
+    Ok(CheckMintFundingOutput {
+        bip32_index: record.bip32_index,
+        mint_address: record.mint_address,
+        state,
+        outpoint: out_outpoint,
+        value_sat: out_value,
+        funded_at_height: out_height,
     })
 }
 
@@ -169,7 +278,12 @@ pub fn list_mints(wallet_path: &Path) -> Result<Vec<MintRecord>> {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct MintMessageInput {
-    pub outpoint: String,
+    /// Identifies the mint by its BIP32 index. Must reference a
+    /// MintRecord whose funding has been observed (use
+    /// `check_mint_funding` first).
+    pub bip32_index: u32,
+    /// Optional L2 destination address. Defaults to the wallet's
+    /// own L2 identity.
     pub to: Option<XOnlyPublicKey>,
 }
 
@@ -186,10 +300,18 @@ pub async fn mint_message(wallet_path: &Path, input: MintMessageInput) -> Result
     let secp = Secp256k1::new();
     let l2_identity = wf.l2_identity_xonly(&secp)?;
     let record = wf
-        .find_mint(&input.outpoint)
-        .ok_or_else(|| anyhow!("no recorded mint for {}", input.outpoint))?
+        .find_mint_by_index(input.bip32_index)
+        .ok_or_else(|| anyhow!("no mint record with bip32_index {}", input.bip32_index))?
         .clone();
-    let outpoint: OutPoint = parse_outpoint(&record.outpoint)?;
+    let outpoint_s = record.outpoint.as_ref().ok_or_else(|| {
+        anyhow!(
+            "mint {} has no observed funding UTXO yet — run check-mint-funding \
+             after sending BTC to {}",
+            input.bip32_index,
+            record.mint_address
+        )
+    })?;
+    let outpoint: OutPoint = parse_outpoint(outpoint_s)?;
     let l2_destination = input.to.unwrap_or(l2_identity);
 
     // Sign the mint message with the L1 mint key that the mint UTXO
@@ -211,7 +333,7 @@ pub async fn mint_message(wallet_path: &Path, input: MintMessageInput) -> Result
         .submit_mint(MintProofEnvelope::V0Outpoint(proof), l2_destination)
         .await?;
     if resp.accepted {
-        if let Some(r) = wf.find_mint_mut(&input.outpoint) {
+        if let Some(r) = wf.find_mint_by_index_mut(input.bip32_index) {
             r.minted = true;
         }
         wf.save(wallet_path)?;
@@ -413,13 +535,8 @@ pub struct LightHeadOutput {
 
 pub async fn light_head(wallet_path: &Path) -> Result<LightHeadOutput> {
     let wf = WalletFile::load(wallet_path)?;
-    let esplora_url = wf
-        .esplora_url
-        .as_ref()
-        .ok_or_else(|| anyhow!("wallet has no esplora_url configured"))?
-        .clone();
     let api = ApiClient::new(wf.sequencer_url.clone(), wf.node_url.clone());
-    let esplora = EsploraClient::new(esplora_url);
+    let esplora = EsploraClient::new(wf.esplora_url.clone());
 
     let genesis = api
         .get_block(0)
@@ -484,12 +601,7 @@ pub async fn light_balance(wallet_path: &Path, input: LightBalanceInput) -> Resu
     let own_addr = wf.xonly_pubkey(&secp)?;
     let target = input.addr.unwrap_or(own_addr);
 
-    let esplora_url = wf
-        .esplora_url
-        .as_ref()
-        .ok_or_else(|| anyhow!("wallet has no esplora_url configured"))?
-        .clone();
-    let esplora = EsploraClient::new(esplora_url);
+    let esplora = EsploraClient::new(wf.esplora_url.clone());
     let api = ApiClient::new(wf.sequencer_url.clone(), wf.node_url.clone());
 
     if let Some(h) = &wf.verified_head {
@@ -578,65 +690,73 @@ pub enum ReclaimStatus {
 
 #[derive(Clone, Debug, Serialize)]
 pub struct ReclaimableMint {
-    pub outpoint: String,
-    pub value_sat: u64,
-    pub lock_blocks: u32,
     pub bip32_index: u32,
+    pub mint_address: String,
+    pub lock_blocks: u32,
+    /// Funding outpoint "<txid>:<vout>". `None` while unfunded.
+    pub outpoint: Option<String>,
+    pub value_sat: Option<u64>,
+    pub funded_at_height: Option<u32>,
     pub minted: bool,
     pub status: ReclaimStatus,
-    /// Set when status is Locked or Ready. None when Pending or
-    /// Reclaimed.
-    pub funded_at_height: Option<u32>,
-    /// Blocks remaining until CSV maturity. Zero when Ready, None when
-    /// Pending or Reclaimed.
+    /// Blocks remaining until CSV maturity. Zero when Ready, None
+    /// when Pending or Reclaimed.
     pub blocks_remaining: Option<u32>,
 }
 
-pub fn list_reclaimable_mints(wallet_path: &Path) -> Result<Vec<ReclaimableMint>> {
+pub async fn list_reclaimable_mints(wallet_path: &Path) -> Result<Vec<ReclaimableMint>> {
     let wf = WalletFile::load(wallet_path)?;
-    let bd = Bitcoind::connect(&wf.bitcoind)?;
-    let tip = bd.block_count()?;
+    let esplora = EsploraClient::new(wf.esplora_url.clone());
+
+    // Single L1-tip lookup, used for every CSV check below. Avoids a
+    // round-trip per mint.
+    let tip = if wf.mints.iter().any(|m| !m.reclaimed && m.funded_at_height.is_some()) {
+        Some(esplora.tip_height().await?)
+    } else {
+        None
+    };
 
     let mut out = Vec::with_capacity(wf.mints.len());
     for m in &wf.mints {
-        let outpoint: OutPoint = parse_outpoint(&m.outpoint)?;
         if m.reclaimed {
             out.push(ReclaimableMint {
+                bip32_index: m.bip32_index,
+                mint_address: m.mint_address.clone(),
+                lock_blocks: m.lock_blocks,
                 outpoint: m.outpoint.clone(),
                 value_sat: m.value_sat,
-                lock_blocks: m.lock_blocks,
-                bip32_index: m.bip32_index,
+                funded_at_height: m.funded_at_height,
                 minted: m.minted,
                 status: ReclaimStatus::Reclaimed,
-                funded_at_height: None,
                 blocks_remaining: None,
             });
             continue;
         }
-        let (confirmed_at, _) = bd.tx_confirmation(&outpoint.txid)?;
-        let (status, funded_at_height, blocks_remaining) = match confirmed_at {
-            None => (ReclaimStatus::Pending, None, None),
+        let (status, blocks_remaining) = match m.funded_at_height {
+            None => (ReclaimStatus::Pending, None),
             Some(h) => {
                 // CSV-mature condition: spend tx mineable in block at
                 // height >= funded_at + lock_blocks. So the spend can
                 // be mined "right now" when tip + 1 >= that bound.
                 let unlock_height = h.saturating_add(m.lock_blocks);
+                let tip = tip.expect("tip queried when any funded record exists");
                 if tip.saturating_add(1) >= unlock_height {
-                    (ReclaimStatus::Ready, Some(h), Some(0))
+                    (ReclaimStatus::Ready, Some(0))
                 } else {
                     let remaining = unlock_height.saturating_sub(tip.saturating_add(1));
-                    (ReclaimStatus::Locked, Some(h), Some(remaining))
+                    (ReclaimStatus::Locked, Some(remaining))
                 }
             }
         };
         out.push(ReclaimableMint {
+            bip32_index: m.bip32_index,
+            mint_address: m.mint_address.clone(),
+            lock_blocks: m.lock_blocks,
             outpoint: m.outpoint.clone(),
             value_sat: m.value_sat,
-            lock_blocks: m.lock_blocks,
-            bip32_index: m.bip32_index,
+            funded_at_height: m.funded_at_height,
             minted: m.minted,
             status,
-            funded_at_height,
             blocks_remaining,
         });
     }
@@ -647,8 +767,7 @@ pub fn list_reclaimable_mints(wallet_path: &Path) -> Result<Vec<ReclaimableMint>
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ReclaimMintInput {
-    /// "<txid>:<vout>" of the mint UTXO to reclaim.
-    pub outpoint: String,
+    pub bip32_index: u32,
     /// Destination L1 address. Network must match the wallet's network.
     pub dest_address: String,
     /// Absolute fee in satoshis. Reclaim tx is small and predictable
@@ -671,35 +790,44 @@ pub struct ReclaimMintOutput {
     pub fee_sat: u64,
 }
 
-pub fn reclaim_mint(wallet_path: &Path, input: ReclaimMintInput) -> Result<ReclaimMintOutput> {
+pub async fn reclaim_mint(wallet_path: &Path, input: ReclaimMintInput) -> Result<ReclaimMintOutput> {
     let mut wf = WalletFile::load(wallet_path)?;
     let secp = Secp256k1::new();
     let network = wf.network.into_bitcoin();
 
-    // Find the mint record.
-    let record_index = wf
+    let record_position = wf
         .mints
         .iter()
-        .position(|m| m.outpoint == input.outpoint)
-        .ok_or_else(|| anyhow!("no mint record for {}", input.outpoint))?;
-    let record = wf.mints[record_index].clone();
+        .position(|m| m.bip32_index == input.bip32_index)
+        .ok_or_else(|| anyhow!("no mint record with bip32_index {}", input.bip32_index))?;
+    let record = wf.mints[record_position].clone();
     if record.reclaimed {
-        bail!("mint {} already reclaimed", input.outpoint);
+        bail!("mint {} already reclaimed", input.bip32_index);
     }
-    let outpoint: OutPoint = parse_outpoint(&record.outpoint)?;
+    let outpoint_s = record.outpoint.as_ref().ok_or_else(|| {
+        anyhow!(
+            "mint {} has no observed funding UTXO yet (run check-mint-funding)",
+            input.bip32_index
+        )
+    })?;
+    let outpoint: OutPoint = parse_outpoint(outpoint_s)?;
+    let value_sat = record
+        .value_sat
+        .ok_or_else(|| anyhow!("mint {} has no recorded value", input.bip32_index))?;
+    let funded_at = record.funded_at_height.ok_or_else(|| {
+        anyhow!(
+            "mint {} not yet confirmed (run check-mint-funding to refresh)",
+            input.bip32_index
+        )
+    })?;
 
-    // Parse destination address with strict network binding.
     let dest = Address::from_str(&input.dest_address)
         .with_context(|| format!("parse destination address {:?}", input.dest_address))?
         .require_network(network)
         .with_context(|| format!("destination address is not on network {network:?}"))?;
 
-    // CSV-maturity check. Same logic as list_reclaimable_mints.
-    let bd = Bitcoind::connect(&wf.bitcoind)?;
-    let tip = bd.block_count()?;
-    let (confirmed_at, _) = bd.tx_confirmation(&outpoint.txid)?;
-    let funded_at = confirmed_at
-        .ok_or_else(|| anyhow!("mint funding tx {} unconfirmed", outpoint.txid))?;
+    let esplora = EsploraClient::new(wf.esplora_url.clone());
+    let tip = esplora.tip_height().await?;
     let unlock_height = funded_at.saturating_add(record.lock_blocks);
     if tip.saturating_add(1) < unlock_height {
         let remaining = unlock_height.saturating_sub(tip.saturating_add(1));
@@ -711,28 +839,26 @@ pub fn reclaim_mint(wallet_path: &Path, input: ReclaimMintInput) -> Result<Recla
         );
     }
 
-    // Derive the mint key (BIP32) and build the signed reclaim tx.
     let mint_kp = wf.mint_keypair(&secp, record.bip32_index)?;
     let tx = reclaim::build_signed_reclaim_tx(
         &secp,
         &mint_kp,
         outpoint,
-        record.value_sat,
+        value_sat,
         record.lock_blocks,
         &dest,
         input.fee_sat,
     )?;
 
-    let txid = bd.send_raw_transaction(&tx).context("broadcast reclaim tx")?;
+    let txid = esplora.broadcast(&tx).await.context("broadcast reclaim tx")?;
 
-    // Mark the mint as reclaimed and persist.
-    wf.mints[record_index].reclaimed = true;
+    wf.mints[record_position].reclaimed = true;
     wf.save(wallet_path)?;
 
     Ok(ReclaimMintOutput {
         txid,
-        value_sat_in: record.value_sat,
-        value_sat_out: record.value_sat.saturating_sub(input.fee_sat),
+        value_sat_in: value_sat,
+        value_sat_out: value_sat.saturating_sub(input.fee_sat),
         fee_sat: input.fee_sat,
     })
 }

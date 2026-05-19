@@ -55,6 +55,14 @@ pub fn mint_utxo(
     err_to_string(ops::mint_utxo(&state.wallet_path, input))
 }
 
+#[tauri::command]
+pub async fn check_mint_funding(
+    state: State<'_, AppState>,
+    input: ops::CheckMintFundingInput,
+) -> Result<ops::CheckMintFundingOutput, String> {
+    err_to_string(ops::check_mint_funding(&state.wallet_path, input).await)
+}
+
 // ---------- Mint message + transfer (L2 side) ----------
 
 #[tauri::command]
@@ -116,16 +124,16 @@ pub async fn light_balance(
 // ---------- Reclaim ----------
 
 #[tauri::command]
-pub fn list_reclaimable_mints(
-    state: State<AppState>,
+pub async fn list_reclaimable_mints(
+    state: State<'_, AppState>,
 ) -> Result<Vec<ops::ReclaimableMint>, String> {
-    err_to_string(ops::list_reclaimable_mints(&state.wallet_path))
+    err_to_string(ops::list_reclaimable_mints(&state.wallet_path).await)
 }
 
 #[tauri::command]
-pub fn reclaim_mint(
-    state: State<AppState>,
+pub async fn reclaim_mint(
+    state: State<'_, AppState>,
     input: ops::ReclaimMintInput,
 ) -> Result<ops::ReclaimMintOutput, String> {
-    err_to_string(ops::reclaim_mint(&state.wallet_path, input))
+    err_to_string(ops::reclaim_mint(&state.wallet_path, input).await)
 }

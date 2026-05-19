@@ -6,23 +6,14 @@
 
 export type Network = "bitcoin" | "testnet" | "signet" | "regtest";
 
-export type BitcoindAuth =
-  | { kind: "cookie"; path: string }
-  | { kind: "user_pass"; user: string; password: string };
-
-export interface BitcoindConfig {
-  url: string;
-  auth: BitcoindAuth;
-}
-
 // ---------- ops::keygen ----------
 
 export interface KeygenInput {
   network: Network;
-  bitcoind: BitcoindConfig;
   sequencer_url: string;
   node_url?: string | null;
-  esplora_url?: string | null;
+  /** Required. Mempool.space / electrs / hodl-node URL. */
+  esplora_url: string;
   force: boolean;
 }
 
@@ -31,34 +22,50 @@ export interface KeygenOutput {
   mnemonic: string;       // BIP39 24-word phrase
 }
 
-// ---------- mints (L1 side) ----------
+// ---------- mints ----------
 
 export interface MintRecord {
-  outpoint: string;       // "txid:vout"
-  value_sat: number;
+  /** Bech32m P2TR deposit address — stable identifier in the UI. */
+  mint_address: string;
   lock_blocks: number;
   bip32_index: number;
+  /** "txid:vout"; populated once a funding UTXO is observed. */
+  outpoint?: string | null;
+  value_sat?: number | null;
+  funded_at_height?: number | null;
   minted: boolean;
   reclaimed: boolean;
 }
 
 export interface MintUtxoInput {
   lock_blocks: number;
-  value_btc: number;
 }
 
 export interface MintUtxoOutput {
-  l1_tip: number;
+  bip32_index: number;
   lock_blocks: number;
+  /** The deposit address to show the user. */
   mint_address: string;
-  txid: string;
-  vout: number;
-  value_sat: number;
+}
+
+export type MintFundingState = "unfunded" | "pending" | "confirmed";
+
+export interface CheckMintFundingInput {
+  bip32_index: number;
+}
+
+export interface CheckMintFundingOutput {
+  bip32_index: number;
+  mint_address: string;
+  state: MintFundingState;
+  outpoint?: string | null;
+  value_sat?: number | null;
+  funded_at_height?: number | null;
 }
 
 export interface MintMessageInput {
-  outpoint: string;
-  to?: string | null;     // L2 dest as x-only hex; null = own address
+  bip32_index: number;
+  to?: string | null;
 }
 
 export interface MintMessageOutput {
@@ -71,7 +78,7 @@ export interface MintMessageOutput {
 // ---------- transfer + balance ----------
 
 export interface TransferInput {
-  to: string;             // x-only pubkey hex
+  to: string;
   amount: number;
 }
 
@@ -81,7 +88,7 @@ export interface TransferOutput {
 }
 
 export interface BalanceInput {
-  addr?: string | null;   // x-only hex; null = own
+  addr?: string | null;
 }
 
 export interface BalanceOutput {
@@ -117,18 +124,19 @@ export interface LightBalanceOutput {
 export type ReclaimStatus = "pending" | "locked" | "ready" | "reclaimed";
 
 export interface ReclaimableMint {
-  outpoint: string;
-  value_sat: number;
-  lock_blocks: number;
   bip32_index: number;
+  mint_address: string;
+  lock_blocks: number;
+  outpoint?: string | null;
+  value_sat?: number | null;
+  funded_at_height?: number | null;
   minted: boolean;
   status: ReclaimStatus;
-  funded_at_height?: number | null;
   blocks_remaining?: number | null;
 }
 
 export interface ReclaimMintInput {
-  outpoint: string;
+  bip32_index: number;
   dest_address: string;
   fee_sat: number;
 }

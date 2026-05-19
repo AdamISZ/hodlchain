@@ -46,7 +46,7 @@ use std::fs;
 use std::path::Path;
 use std::str::FromStr;
 
-pub use hodl_core::config::{BitcoindAuth, BitcoindConfig, NetworkName};
+pub use hodl_core::config::NetworkName;
 
 pub const DEFAULT_WALLET_PATH: &str = "./hodl-wallet.json";
 
@@ -60,18 +60,20 @@ pub struct WalletFile {
     pub network: NetworkName,
     /// BIP39 mnemonic (24 words by default).
     pub mnemonic: String,
-    pub bitcoind: BitcoindConfig,
+    /// L2 sequencer base URL — submit endpoint for mint messages
+    /// and transfers.
     pub sequencer_url: String,
+    /// Optional L2 follower (node) base URL — used for block/witness
+    /// queries that the light verifier needs.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub node_url: Option<String>,
-    /// Esplora HTTP base URL for light-client mode (e.g.
-    /// `https://mempool.space/api`). The two endpoints used are
-    /// `/tx/:txid` and `/tx/:txid/outspend/:vout`. The demo points
-    /// this at `hodl-node` which exposes the same shape.
-    #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub esplora_url: Option<String>,
+    /// Esplora HTTP base URL — *required*. Sole L1 data source for
+    /// the wallet (the wallet never speaks bitcoind directly). Points
+    /// at mempool.space / a self-hosted electrs / hodl-node (which
+    /// proxies the Esplora subset over a local bitcoind).
+    pub esplora_url: String,
     /// Next derivation index for L1 mint keys. Incremented by every
-    /// successful `mint-utxo`. Lookup of any past mint's key goes via
+    /// successful `mint-utxo` call. Per-mint keypair lookup goes via
     /// `MintRecord.bip32_index`, so the counter is just for monotonic
     /// allocation.
     #[serde(default)]
@@ -86,26 +88,51 @@ pub fn network_from_str(s: &str) -> Result<NetworkName> {
     NetworkName::from_str_ci(s).ok_or_else(|| anyhow!("unknown network: {s}"))
 }
 
-/// One CSV-locked mint UTXO we created via this wallet. Persisted so a
-/// later `mint-message` (and later still, `reclaim`) can find the proof
-/// inputs without re-querying the chain for everything.
+/// One CSV-locked mint UTXO this wallet is tracking.
+///
+/// State machine (each row is a strict superset of the previous):
+///
+///   1. **Created**: `mint_address` + `lock_blocks` + `bip32_index`.
+///      The wallet has derived the L1 mint key, computed the
+///      deposit address, and shown it to the user. No on-chain
+///      activity yet.
+///   2. **Funded**: above + `outpoint` + `value_sat` +
+///      `funded_at_height`. An external wallet sent BTC to
+///      `mint_address`; we discovered the UTXO via Esplora.
+///   3. **Minted**: above + `minted = true`. The mint message was
+///      submitted and the sequencer accepted it.
+///   4. **Reclaimed**: above + `reclaimed = true`. The CSV-locked
+///      UTXO was spent back to a user destination.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MintRecord {
-    /// "<txid>:<vout>"
-    pub outpoint: String,
-    pub value_sat: u64,
+    /// L1 address (bech32m P2TR) that the user funds. Derived from
+    /// `(bip32_index, lock_blocks, network)` and stable for the life
+    /// of the record. The user-facing identifier for a mint.
+    pub mint_address: String,
     /// Relative locktime baked into L_spend's CSV, in blocks.
     pub lock_blocks: u32,
-    /// BIP32 derivation index of the L1 mint key under this mint's
-    /// UTXO script. Needed for the eventual CSV reclaim signature.
+    /// BIP32 derivation index of the L1 mint key under
+    /// `m/HODL'/coin_type'/0'/0/<index>`. Needed for both the mint
+    /// message signature and the CSV reclaim signature.
     pub bip32_index: u32,
+    /// Funding outpoint "<txid>:<vout>". Populated once a UTXO at
+    /// `mint_address` is observed via Esplora.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub outpoint: Option<String>,
+    /// Funding value in sats. Populated alongside `outpoint`.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub value_sat: Option<u64>,
+    /// L1 height the funding tx was confirmed at. Populated alongside
+    /// `outpoint`. Used by the reclaim flow to check CSV maturity.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub funded_at_height: Option<u32>,
     /// True once we have submitted a mint message that the sequencer
-    /// accepted. Local hint; the sequencer's consumed-nullifier set is
-    /// authoritative.
+    /// accepted. Local hint; the sequencer's consumed-nullifier set
+    /// is authoritative.
     #[serde(default)]
     pub minted: bool,
     /// True once we have broadcast a reclaim transaction. Local hint;
-    /// bitcoind / Esplora is authoritative.
+    /// Esplora is authoritative.
     #[serde(default)]
     pub reclaimed: bool,
 }
@@ -231,20 +258,34 @@ impl WalletFile {
         self.xonly_pubkey(secp)
     }
 
-    pub fn upsert_mint(&mut self, record: MintRecord) {
-        if let Some(existing) = self.mints.iter_mut().find(|m| m.outpoint == record.outpoint) {
-            *existing = record;
-        } else {
-            self.mints.push(record);
-        }
+    /// Append a freshly-created mint record. Each mint gets a unique
+    /// `bip32_index`, so duplicates here would be a bug. Caller is
+    /// expected to allocate the index via `allocate_mint_keypair`
+    /// before calling.
+    pub fn append_mint(&mut self, record: MintRecord) {
+        debug_assert!(
+            !self.mints.iter().any(|m| m.bip32_index == record.bip32_index),
+            "mint at bip32_index {} already exists",
+            record.bip32_index
+        );
+        self.mints.push(record);
     }
 
-    pub fn find_mint(&self, outpoint: &str) -> Option<&MintRecord> {
-        self.mints.iter().find(|m| m.outpoint == outpoint)
+    /// Look up a mint by its BIP32 derivation index — the canonical
+    /// stable identifier (the deposit address is also unique but the
+    /// index is shorter and used at every CLI / UI boundary).
+    pub fn find_mint_by_index(&self, index: u32) -> Option<&MintRecord> {
+        self.mints.iter().find(|m| m.bip32_index == index)
     }
 
-    pub fn find_mint_mut(&mut self, outpoint: &str) -> Option<&mut MintRecord> {
-        self.mints.iter_mut().find(|m| m.outpoint == outpoint)
+    pub fn find_mint_by_index_mut(&mut self, index: u32) -> Option<&mut MintRecord> {
+        self.mints.iter_mut().find(|m| m.bip32_index == index)
+    }
+
+    /// Look up a mint by its deposit address. Useful at funding-watch
+    /// time when the index isn't already in hand.
+    pub fn find_mint_by_address(&self, addr: &str) -> Option<&MintRecord> {
+        self.mints.iter().find(|m| m.mint_address == addr)
     }
 }
 
@@ -306,16 +347,9 @@ mod tests {
         WalletFile {
             network,
             mnemonic: mn,
-            bitcoind: BitcoindConfig {
-                url: "http://localhost:0".into(),
-                auth: BitcoindAuth::UserPass {
-                    user: "x".into(),
-                    password: "x".into(),
-                },
-            },
             sequencer_url: "http://localhost:0".into(),
             node_url: None,
-            esplora_url: None,
+            esplora_url: "http://localhost:0".into(),
             next_mint_index: 0,
             mints: vec![],
             verified_head: None,
