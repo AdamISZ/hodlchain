@@ -24,11 +24,17 @@ import type {
   ReclaimMintOutput,
 } from "./types";
 
-// ---------- Session / wallet existence ----------
+// ---------- Wallet management ----------
 
-export const walletPath = (): Promise<string> => invoke("wallet_path");
+export const listWallets = (): Promise<string[]> => invoke("list_wallets");
 
-export const walletExists = (): Promise<boolean> => invoke("wallet_exists");
+export const currentWallet = (): Promise<string | null> =>
+  invoke("current_wallet");
+
+export const selectWallet = (name: string): Promise<void> =>
+  invoke("select_wallet", { name });
+
+export const deselectWallet = (): Promise<void> => invoke("deselect_wallet");
 
 // ---------- Keys / addresses ----------
 

@@ -3,6 +3,7 @@
 
 export type View =
   | "loading"
+  | "picker"
   | "setup"
   | "dashboard"
   | "mint"
@@ -11,8 +12,8 @@ export type View =
 
 export const session = $state({
   view: "loading" as View,
-  walletPath: null as string | null,
-  walletExists: null as boolean | null,
+  /** Name of the currently-active wallet, or null when not selected. */
+  currentWallet: null as string | null,
 });
 
 export function go(v: View) {

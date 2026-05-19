@@ -21,3 +21,4 @@ pub mod ops;
 pub mod reclaim;
 pub mod verify;
 pub mod wallet;
+pub mod wallets;

@@ -8,7 +8,13 @@ export type Network = "bitcoin" | "testnet" | "signet" | "regtest";
 
 // ---------- ops::keygen ----------
 
+/**
+ * Backend-flattened shape: `name` selects the wallet filename
+ * (`<name>.json` in the wallets dir); the rest is the inner
+ * `ops::KeygenInput`. We mirror the flat structure here.
+ */
 export interface KeygenInput {
+  name: string;
   network: Network;
   sequencer_url: string;
   node_url?: string | null;

@@ -26,13 +26,18 @@ pub fn run() {
         .init();
 
     let app_state = state::AppState::init().expect("init AppState");
-    tracing::info!(wallet_path = %app_state.wallet_path.display(), "starting hodlcoin desktop");
+    tracing::info!(
+        wallets_dir = %app_state.wallets_dir.display(),
+        "starting hodlcoin desktop"
+    );
 
     tauri::Builder::default()
         .manage(app_state)
         .invoke_handler(tauri::generate_handler![
-            commands::wallet_path,
-            commands::wallet_exists,
+            commands::list_wallets,
+            commands::current_wallet,
+            commands::select_wallet,
+            commands::deselect_wallet,
             commands::keygen,
             commands::address,
             commands::list_mints,

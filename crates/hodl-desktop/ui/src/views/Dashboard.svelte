@@ -2,7 +2,7 @@
   import { onMount } from "svelte";
   import * as api from "../lib/api";
   import type { LightBalanceOutput } from "../lib/types";
-  import { go } from "../lib/state.svelte";
+  import { go, session } from "../lib/state.svelte";
 
   let head = $state<LightBalanceOutput | null>(null);
   let busy = $state(false);
@@ -20,6 +20,12 @@
     }
   }
 
+  async function switchWallet() {
+    await api.deselectWallet();
+    session.currentWallet = null;
+    go("picker");
+  }
+
   onMount(refresh);
 
   // Format atom amounts with an underscore every three digits, just
@@ -34,7 +40,18 @@
 </script>
 
 <header class="topbar">
-  <h1>hodlcoin</h1>
+  <div class="left">
+    <h1>hodlcoin</h1>
+    {#if session.currentWallet}
+      <span class="wallet">
+        <span class="muted small">wallet:</span>
+        <strong>{session.currentWallet}</strong>
+        <button class="switch" onclick={switchWallet} title="switch wallet">
+          switch
+        </button>
+      </span>
+    {/if}
+  </div>
   <nav>
     <button onclick={() => go("mint")}>deposit (mint)</button>
     <button onclick={() => go("transfer")}>send</button>
@@ -98,6 +115,23 @@
   .topbar h1 {
     margin: 0;
     font-size: 1.1rem;
+  }
+  .left {
+    display: flex;
+    align-items: baseline;
+    gap: var(--space-4);
+  }
+  .wallet {
+    display: inline-flex;
+    align-items: baseline;
+    gap: var(--space-2);
+  }
+  .switch {
+    padding: 0.1rem 0.5rem;
+    font-size: 0.8rem;
+  }
+  .small {
+    font-size: 0.85rem;
   }
   nav {
     display: flex;

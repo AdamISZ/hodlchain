@@ -3,6 +3,7 @@
   import * as api from "./lib/api";
   import { session, go } from "./lib/state.svelte";
   import Setup from "./views/Setup.svelte";
+  import WalletPicker from "./views/WalletPicker.svelte";
   import Dashboard from "./views/Dashboard.svelte";
   import Mint from "./views/Mint.svelte";
   import Transfer from "./views/Transfer.svelte";
@@ -12,9 +13,19 @@
 
   onMount(async () => {
     try {
-      session.walletPath = await api.walletPath();
-      session.walletExists = await api.walletExists();
-      go(session.walletExists ? "dashboard" : "setup");
+      // Honour any pre-existing backend selection (e.g. from a
+      // previous run that lingered in process memory) — but the
+      // backend resets `current_wallet` to None on each app start,
+      // so in practice this is null and we land on the picker.
+      session.currentWallet = await api.currentWallet();
+      const wallets = await api.listWallets();
+      if (session.currentWallet) {
+        go("dashboard");
+      } else if (wallets.length === 0) {
+        go("setup");
+      } else {
+        go("picker");
+      }
     } catch (e) {
       bootErr = String(e);
     }
@@ -30,6 +41,8 @@
   <main class="loading">
     <p class="muted">loading…</p>
   </main>
+{:else if session.view === "picker"}
+  <WalletPicker />
 {:else if session.view === "setup"}
   <Setup />
 {:else if session.view === "dashboard"}

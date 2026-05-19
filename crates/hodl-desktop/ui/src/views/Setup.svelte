@@ -1,12 +1,13 @@
 <script lang="ts">
   import * as api from "../lib/api";
-  import { go } from "../lib/state.svelte";
+  import { go, session } from "../lib/state.svelte";
   import type { Network } from "../lib/types";
 
   // Form fields. Pre-filled with the regtest demo's endpoints so a
   // user running `scripts/regtest-demo.sh --keep-running` can hit
   // Create immediately. For production use, the user would point
   // these at their own sequencer, node, and Esplora (or mempool.space).
+  let name = $state("");
   let network = $state<Network>("regtest");
   let sequencerUrl = $state("http://127.0.0.1:28080");
   let nodeUrl = $state("http://127.0.0.1:28081");
@@ -17,11 +18,18 @@
   let mnemonic = $state<string | null>(null);
   let l2Address = $state<string | null>(null);
 
+  // Lightweight client-side check — mirrors hodl_wallet::wallets::validate_name.
+  // Server re-validates so this just keeps the button gated.
+  let nameOk = $derived(
+    /^[A-Za-z0-9_-]+$/.test(name) && name.length >= 1 && name.length <= 32,
+  );
+
   async function submit() {
     err = null;
     busy = true;
     try {
       const out = await api.keygen({
+        name,
         network,
         sequencer_url: sequencerUrl,
         node_url: nodeUrl || null,
@@ -30,6 +38,8 @@
       });
       mnemonic = out.mnemonic;
       l2Address = out.l2_address;
+      // Backend made this wallet the active one as part of keygen.
+      session.currentWallet = name;
     } catch (e) {
       err = String(e);
     } finally {
@@ -39,6 +49,10 @@
 
   function done() {
     go("dashboard");
+  }
+
+  function backToPicker() {
+    go("picker");
   }
 </script>
 
@@ -58,6 +72,20 @@
     {/if}
 
     <div class="card stack">
+      <div class="field">
+        <label for="name">wallet name</label>
+        <input
+          id="name"
+          type="text"
+          placeholder="e.g. alice, mainnet-cold"
+          bind:value={name}
+        />
+        <small class="muted">
+          a–z, A–Z, 0–9, hyphen, underscore. 1–32 chars.
+          Stored as <code>~/.config/hodlcoin/wallets/&lt;name&gt;.json</code>.
+        </small>
+      </div>
+
       <div class="field">
         <label for="network">network</label>
         <select id="network" bind:value={network}>
@@ -88,7 +116,8 @@
       </div>
 
       <div class="row">
-        <button class="primary" disabled={busy} onclick={submit}>
+        <button onclick={backToPicker} disabled={busy}>← back</button>
+        <button class="primary" disabled={busy || !nameOk} onclick={submit}>
           {busy ? "generating…" : "create wallet"}
         </button>
       </div>
