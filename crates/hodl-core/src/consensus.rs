@@ -6,17 +6,17 @@
 use bitcoin::secp256k1::XOnlyPublicKey;
 use sha2::{Digest, Sha256};
 
-/// hodlcoin chain identifier. Used to derive the tagged-hash tag that
+/// hodlchain chain identifier. Used to derive the tagged-hash tag that
 /// binds each mint UTXO's L_data leaf to this L2's namespace.
 ///
 /// Single value across networks: cross-network UTXO reuse is impossible
 /// because regtest/signet/mainnet have disjoint chain histories.
-pub const CHAIN_ID: &str = "hodlcoin";
+pub const CHAIN_ID: &str = "hodlchain";
 
 /// BIP340 tagged-hash tag for the `L_data` payload `D`.
 ///
 /// `D = TaggedHash(DATA_LEAF_TAG, user_xonly_pubkey)`.
-pub const DATA_LEAF_TAG: &str = "L2/hodlcoin/v1";
+pub const DATA_LEAF_TAG: &str = "L2/hodlchain/v1";
 
 /// Compute `D = TaggedHash(DATA_LEAF_TAG, user_xonly_pubkey)`.
 ///
@@ -30,7 +30,7 @@ pub fn data_leaf_commitment(user_pk: &XOnlyPublicKey) -> [u8; 32] {
     h.finalize().into()
 }
 
-/// Magic bytes prefixing every hodlcoin OP_RETURN attestation.
+/// Magic bytes prefixing every hodlchain OP_RETURN attestation.
 pub const MAGIC: [u8; 4] = *b"HODL";
 
 /// Attestation payload version byte. Bumped on any layout change.
@@ -42,7 +42,7 @@ pub const ATTESTATION_VERSION: u8 = 0;
 pub const ATTESTATION_LEN: usize = 4 + 1 + 4 + 32 + 32;
 
 /// BIP341 H, the recommended NUMS x-only public key.
-/// Used as the internal key of every hodlcoin mint Taproot output, so that the
+/// Used as the internal key of every hodlchain mint Taproot output, so that the
 /// only spend path is the CLTV tapleaf.
 pub const BIP341_NUMS_H_XONLY: [u8; 32] = [
     0x50, 0x92, 0x9b, 0x74, 0xc1, 0xa0, 0x49, 0x54, 0xb7, 0x8b, 0x4b, 0x60, 0x35, 0xe9, 0x7a, 0x5e,

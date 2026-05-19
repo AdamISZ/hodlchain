@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# End-to-end regtest demo of the hodlcoin POC.
+# End-to-end regtest demo of the hodlchain POC.
 #
 # Spins up a fresh bitcoind in a temp datadir, creates a sequencer-funding
 # wallet and a user wallet inside bitcoind, starts the hodl-sequencer and
@@ -142,7 +142,7 @@ trap cleanup EXIT INT TERM
 
 # --- Build -----------------------------------------------------------------
 
-say "building hodlcoin binaries"
+say "building hodlchain binaries"
 # Note: relies on `default-members` in the workspace Cargo.toml to
 # skip hodl-desktop (which needs libwebkit2gtk-4.1-dev etc.).
 (cd "$ROOT" && cargo build 2>&1) | tail -1

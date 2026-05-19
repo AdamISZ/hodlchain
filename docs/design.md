@@ -1,4 +1,4 @@
-# hodlcoin POC — design notes
+# hodlchain POC — design notes
 
 Companion to `issuancev2.tex`. Captures the v0 implementation decisions; the paper specifies the issuance primitive itself.
 
@@ -46,22 +46,22 @@ crates/
 
 Updated to match `issuancev2.tex` §2 + §5.
 
-A hodlcoin mint UTXO is a Taproot output whose internal key is BIP341 NUMS H, with a tap tree containing **exactly two leaves**:
+A hodlchain mint UTXO is a Taproot output whose internal key is BIP341 NUMS H, with a tap tree containing **exactly two leaves**:
 
 ```text
 L_spend = <T> OP_CHECKSEQUENCEVERIFY OP_DROP <user_xonly_pubkey> OP_CHECKSIG
-L_data  = OP_RETURN <D>          where  D = TaggedHash("L2/hodlcoin/v1", user_xonly_pubkey)
+L_data  = OP_RETURN <D>          where  D = TaggedHash("L2/hodlchain/v1", user_xonly_pubkey)
 ```
 
 - `L_spend` uses **CSV (BIP112)**, not CLTV. `T` is the **relative** locktime in blocks — the committed duration. The leaf is spendable `T` blocks after the funding UTXO confirms; the spend tx must set its input `nSequence` accordingly. Per `issuancev2.tex` §2 "Why CSV rather than CLTV": the minting function takes `T` directly as its argument, so binding `T` itself into the script (rather than an absolute `T_unlock` that requires a chain-state lookup to convert to a duration) is cleaner, and avoids exposing the locker's intended duration to mempool-confirmation latency.
-- `L_data` is permanently unspendable (tapscript inherits Bitcoin's rule that `OP_RETURN` aborts script execution). It exists only as a 32-byte committed payload binding the UTXO to hodlcoin's namespace.
+- `L_data` is permanently unspendable (tapscript inherits Bitcoin's rule that `OP_RETURN` aborts script execution). It exists only as a 32-byte committed payload binding the UTXO to hodlchain's namespace.
 - `D` being keyed by `user_xonly_pubkey` (not a protocol constant) makes each locker's `L_data` leaf hash a unique-looking random 32-byte value; an outsider with one locker's leaf hash cannot identify others'.
 
 The NUMS internal key is non-negotiable: it's what *forces* the locker to honour the timelock — any spendable internal key would let them dodge the CSV via the key path.
 
 ### Lock-duration ceiling (v0 limitation)
 
-BIP112's block-based relative locktime uses the lower 16 bits of `nSequence`, so `T ∈ [1, 65535]` (≈ 1 to 454 days at 10 minute blocks). This is a hard CSV-blocks-mode limit, not a hodlcoin design choice. At the cap with `r = 1/26280` the locker still receives `f_mint(V, 65535, 1/26280) ≈ 0.71 V`, so the cap is well above the useful regime. Multi-year locks would require either the 512-second time form (which has its own 16-bit cap, also ≈ 388 days) or chained CSV locks; both are out of POC scope.
+BIP112's block-based relative locktime uses the lower 16 bits of `nSequence`, so `T ∈ [1, 65535]` (≈ 1 to 454 days at 10 minute blocks). This is a hard CSV-blocks-mode limit, not a hodlchain design choice. At the cap with `r = 1/26280` the locker still receives `f_mint(V, 65535, 1/26280) ≈ 0.71 V`, so the cap is well above the useful regime. Multi-year locks would require either the 512-second time form (which has its own 16-bit cap, also ≈ 388 days) or chained CSV locks; both are out of POC scope.
 
 The output scriptPubKey is `OP_1 <Q>` where `Q` is the BIP341 taproot output key:
 
@@ -77,11 +77,11 @@ TapBranch(a, b) = TaggedHash("TapBranch", a‖b)   if a ≤ b else (b‖a)
 
 - *During the lock period*: full L1 anonymity. The output is an ordinary P2TR; no observer can tell it apart from any other taproot output.
 - *At mint time*: leakage to L2 viewers only. The mint proof reveals `(outpoint, V, T, pk, l2_destination)` to anyone reading L2 blocks; L1 sees nothing.
-- *At unlock time*: residual L1 identifiability. The locker's script-path spend witness reveals a control block containing `h(L_data)`. An observer who computes `TaggedHash("L2/hodlcoin/v1", pk)` (with `pk` taken from the revealed `L_spend`) and rehashes as a candidate leaf can confirm that the UTXO was a hodlcoin mint. We accept this in v0; the paper lays out the decoy-leaves and ZK upgrade paths that close it.
+- *At unlock time*: residual L1 identifiability. The locker's script-path spend witness reveals a control block containing `h(L_data)`. An observer who computes `TaggedHash("L2/hodlchain/v1", pk)` (with `pk` taken from the revealed `L_spend`) and rehashes as a candidate leaf can confirm that the UTXO was a hodlchain mint. We accept this in v0; the paper lays out the decoy-leaves and ZK upgrade paths that close it.
 
 ### chain_id
 
-Single string `"hodlcoin"` across all networks. Cross-network UTXO reuse is already impossible (regtest, signet, and mainnet have disjoint chain histories, so an outpoint that exists on one cannot exist on another). The chain_id is hardcoded in `hodl-core::consensus` for v0; it can be promoted to consensus config later if multiple parallel deployments are needed.
+Single string `"hodlchain"` across all networks. Cross-network UTXO reuse is already impossible (regtest, signet, and mainnet have disjoint chain histories, so an outpoint that exists on one cannot exist on another). The chain_id is hardcoded in `hodl-core::consensus` for v0; it can be promoted to consensus config later if multiple parallel deployments are needed.
 
 ### Mint proof wire format
 
@@ -104,7 +104,7 @@ The verifier reconstructs `L_spend`, `L_data`, both leaf hashes, the Merkle root
 2. Check `lock_blocks ∈ [1, 65535]` (BIP112 block-mode range).
 3. Reconstruct `L_spend`, `L_data` from `(pk, lock_blocks)` and chain_id.
 4. Build the 2-leaf tap tree with NUMS-H as internal key, derive `expected_spk = OP_1 <Q_x>`.
-5. Assert `expected_spk == scriptPubKey`. (This is the single check that simultaneously verifies: SPK matches, internal key is NUMS, both leaves are present, both are well-formed, `pk` is the one bound, `T` is the one bound, and chain_id matches hodlcoin.)
+5. Assert `expected_spk == scriptPubKey`. (This is the single check that simultaneously verifies: SPK matches, internal key is NUMS, both leaves are present, both are well-formed, `pk` is the one bound, `T` is the one bound, and chain_id matches hodlchain.)
 6. Verify the Schnorr signature over `sha256("hodl-mint-v0" || outpoint || l2_destination)` under `pk`.
 7. Require `confirmations >= MINT_CONFIRMATIONS` (= 1 in v0).
 8. Compute `amount = mint_fn(value_sat, lock_blocks, r)`. No `T_create` arithmetic needed — `T = lock_blocks` is what the script committed to.
@@ -305,7 +305,7 @@ GET /tx/:txid/outspend/:vout      → next tx that spent this outpoint
 GET /tx/:txid                     → that tx's full structure
 ```
 
-For each step, parse `vout[0]` as a hodlcoin OP_RETURN attestation
+For each step, parse `vout[0]` as a hodlchain OP_RETURN attestation
 payload, record `(height, block_hash, state_root)`, advance to
 `new_anchor = (txid, 1)`. Two cheap HTTP calls per L2 block. No
 bitcoind required. The Esplora endpoint is a single dependency on a

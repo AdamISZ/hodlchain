@@ -1,10 +1,10 @@
-//! hodlcoin desktop app (Tauri v2 + Svelte 5 + TypeScript).
+//! hodlchain desktop app (Tauri v2 + Svelte 5 + TypeScript).
 //!
 //! The Rust side is intentionally tiny. All wallet business logic
 //! lives in `hodl_wallet::ops`; everything here is glue:
 //!
 //! - `state::AppState` resolves and holds the wallet-file path
-//!   (`$XDG_CONFIG_HOME/hodlcoin/wallet.json` on Linux, equivalents
+//!   (`$XDG_CONFIG_HOME/hodlchain/wallet.json` on Linux, equivalents
 //!   on macOS / Windows via the `dirs` crate). The frontend never
 //!   sees a `PathBuf` — that's session context, not a per-call arg.
 //! - `commands` wraps each `ops::*` function in a
@@ -28,7 +28,7 @@ pub fn run() {
     let app_state = state::AppState::init().expect("init AppState");
     tracing::info!(
         wallets_dir = %app_state.wallets_dir.display(),
-        "starting hodlcoin desktop"
+        "starting hodlchain desktop"
     );
 
     tauri::Builder::default()

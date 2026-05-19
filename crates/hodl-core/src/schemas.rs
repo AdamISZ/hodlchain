@@ -1,4 +1,4 @@
-//! Doc-only stubs for external (non-hodlcoin) types that show up on
+//! Doc-only stubs for external (non-hodlchain) types that show up on
 //! our HTTP wire. These structs exist only to give `utoipa` a shape to
 //! describe in the OpenAPI spec — they are never instantiated; the
 //! real types serialise with the same JSON shape.

@@ -259,7 +259,7 @@ pub async fn walk_attestation_chain(
             .with_context(|| format!("parse OP_RETURN of {spender_txid}"))?
             .ok_or_else(|| {
                 anyhow!(
-                    "vout=0 of {spender_txid} is not a hodlcoin attestation \
+                    "vout=0 of {spender_txid} is not a hodlchain attestation \
                      (wrong magic / length) — chain corrupt at L1 height {l1_height}"
                 )
             })?;

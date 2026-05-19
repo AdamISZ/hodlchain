@@ -1,6 +1,6 @@
 //! L1-side helpers: BIP341 NUMS internal key, the two tapleaves
 //! (`L_spend` and `L_data`), and the canonical 2-leaf taproot construction
-//! used by every hodlcoin mint UTXO.
+//! used by every hodlchain mint UTXO.
 //!
 //! See `docs/issuancev2.tex` §2 + §5.
 
@@ -13,7 +13,7 @@ use bitcoin::{Address, Network, ScriptBuf, TapLeafHash};
 use crate::consensus::{data_leaf_commitment, BIP341_NUMS_H_XONLY};
 
 /// Return the BIP341 H NUMS x-only key used as the internal key for every
-/// hodlcoin mint Taproot output.
+/// hodlchain mint Taproot output.
 pub fn nums_internal_key() -> XOnlyPublicKey {
     XOnlyPublicKey::from_slice(&BIP341_NUMS_H_XONLY)
         .expect("BIP341 H is a valid x-only key constant")
@@ -47,7 +47,7 @@ pub fn csv_tapleaf_script(lock_blocks: u32, user_pk: &XOnlyPublicKey) -> ScriptB
 /// OP_RETURN <D>           // 34 bytes: OP_RETURN OP_PUSHBYTES_32 <32-byte D>
 /// ```
 ///
-/// `D = TaggedHash("L2/hodlcoin/v1", user_xonly_pubkey)`. Tapscript
+/// `D = TaggedHash("L2/hodlchain/v1", user_xonly_pubkey)`. Tapscript
 /// inherits Bitcoin's rule that `OP_RETURN` aborts script execution, so
 /// this leaf is permanently unspendable; it serves only as a committed
 /// namespace stamp.
@@ -64,7 +64,7 @@ pub fn tapleaf_hash(script: &ScriptBuf) -> TapLeafHash {
     TapLeafHash::from_script(script.as_script(), LeafVersion::TapScript)
 }
 
-/// Derive the canonical hodlcoin mint Taproot construction: a 2-leaf tree
+/// Derive the canonical hodlchain mint Taproot construction: a 2-leaf tree
 /// `{L_spend, L_data}` under the NUMS H internal key.
 pub fn derive_mint_taproot<C: Verification>(
     secp: &Secp256k1<C>,
@@ -85,7 +85,7 @@ pub fn derive_mint_taproot<C: Verification>(
     (spk, spend)
 }
 
-/// Build the bech32m address for a hodlcoin mint output.
+/// Build the bech32m address for a hodlchain mint output.
 pub fn mint_address<C: Verification>(
     secp: &Secp256k1<C>,
     lock_blocks: u32,
@@ -96,7 +96,7 @@ pub fn mint_address<C: Verification>(
     Address::p2tr_tweaked(spend.output_key(), network)
 }
 
-/// Recompute the P2TR scriptPubKey that a hodlcoin mint UTXO must have,
+/// Recompute the P2TR scriptPubKey that a hodlchain mint UTXO must have,
 /// given the locker's `(pk, lock_blocks)`. This is what a verifier checks
 /// against the on-chain scriptPubKey.
 pub fn expected_p2tr_spk<C: Verification>(

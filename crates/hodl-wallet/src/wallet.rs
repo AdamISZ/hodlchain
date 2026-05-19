@@ -6,7 +6,7 @@
 //! ## Key model
 //!
 //! The wallet stores a **BIP39 24-word mnemonic**. All operational
-//! keys are derived from it via BIP32 under hodlcoin-specific BIP44
+//! keys are derived from it via BIP32 under hodlchain-specific BIP44
 //! paths:
 //!
 //! ```text
@@ -16,7 +16,7 @@
 //! where:
 //! - `HODL' = 1213154380'` (= 0x484F444C) — the ASCII bytes
 //!   `'H' 'O' 'D' 'L'` interpreted as a big-endian u32, then
-//!   hardened. Hodlcoin-specific purpose word, deliberately distinct
+//!   hardened. Hodlchain-specific purpose word, deliberately distinct
 //!   from BIP86 (which is reserved for plain P2TR receive keys; our
 //!   L1 keys go into a custom CSV-locked script and never appear as
 //!   P2TR receive addresses).
@@ -50,10 +50,10 @@ pub use hodl_core::config::NetworkName;
 
 pub const DEFAULT_WALLET_PATH: &str = "./hodl-wallet.json";
 
-/// Hodlcoin BIP44 purpose word: ASCII bytes `'H','O','D','L'` as a
+/// Hodlchain BIP44 purpose word: ASCII bytes `'H','O','D','L'` as a
 /// big-endian u32 (= 0x484F444C = 1_213_154_380). Hardened in
 /// derivation paths via the `'` suffix in the string form.
-pub const HODLCOIN_PURPOSE: u32 = 0x484F444C;
+pub const HODLCHAIN_PURPOSE: u32 = 0x484F444C;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WalletFile {
@@ -185,7 +185,7 @@ impl WalletFile {
         let coin = self.network.slip44_coin_type();
         DerivationPath::from_str(&format!(
             "m/{}'/{}'/0'/0/{}",
-            HODLCOIN_PURPOSE, coin, index
+            HODLCHAIN_PURPOSE, coin, index
         ))
         .context("build mint-key derivation path")
     }
@@ -194,7 +194,7 @@ impl WalletFile {
     /// `m / HODL' / coin_type' / 1' / 0 / 0`
     pub fn l2_identity_path(&self) -> Result<DerivationPath> {
         let coin = self.network.slip44_coin_type();
-        DerivationPath::from_str(&format!("m/{}'/{}'/1'/0/0", HODLCOIN_PURPOSE, coin))
+        DerivationPath::from_str(&format!("m/{}'/{}'/1'/0/0", HODLCHAIN_PURPOSE, coin))
             .context("build L2-identity derivation path")
     }
 
@@ -337,9 +337,9 @@ mod tests {
     #[test]
     fn hodl_purpose_constant() {
         // ASCII 'H','O','D','L' as big-endian u32 = 0x484F444C = 1_213_154_380.
-        assert_eq!(HODLCOIN_PURPOSE, u32::from_be_bytes(*b"HODL"));
-        assert_eq!(HODLCOIN_PURPOSE, 0x484F444C);
-        assert_eq!(HODLCOIN_PURPOSE, 1_213_154_380);
+        assert_eq!(HODLCHAIN_PURPOSE, u32::from_be_bytes(*b"HODL"));
+        assert_eq!(HODLCHAIN_PURPOSE, 0x484F444C);
+        assert_eq!(HODLCHAIN_PURPOSE, 1_213_154_380);
     }
 
     fn make_test_wallet(network: NetworkName) -> WalletFile {

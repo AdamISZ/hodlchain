@@ -1,4 +1,4 @@
-# hodlcoin
+# hodlchain
 
 A proof-of-concept Layer 2 anchored to Bitcoin, exploring a fair-launch
 issuance primitive: users provably commit Bitcoin via a relative

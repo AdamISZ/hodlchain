@@ -1,4 +1,4 @@
-//! hodl-core: shared types and consensus rules for the hodlcoin POC.
+//! hodl-core: shared types and consensus rules for the hodlchain POC.
 //!
 //! See `docs/design.md` and `docs/issuance.tex`.
 //!

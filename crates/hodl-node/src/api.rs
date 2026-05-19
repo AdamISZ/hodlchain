@@ -227,10 +227,10 @@ fn parse_xonly(s: &str) -> anyhow::Result<XOnlyPublicKey> {
 
 // ---------- Esplora-compatible (slim) responses --------------------------
 //
-// These are the subset of Esplora's HTTP API needed by hodlcoin light
+// These are the subset of Esplora's HTTP API needed by hodlchain light
 // clients to walk the attestation chain. Returned JSON fields match the
 // Esplora schema where present; full Esplora responses have more fields
-// (block status, fee, sizes, etc.) that we omit. Pointing a hodlcoin
+// (block status, fee, sizes, etc.) that we omit. Pointing a hodlchain
 // light client at a real Esplora endpoint (e.g. mempool.space) works
 // identically — the wallet just ignores the extra fields.
 

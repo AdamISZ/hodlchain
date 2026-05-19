@@ -275,5 +275,5 @@ Scope:         Proof covers transfers + retargeting + SMT updates.
 ```
 
 That stack has been validated by zkSync Lite (~3000 tx batches,
-~30s proving on a server). Replicating it for hodlcoin's specific
+~30s proving on a server). Replicating it for hodlchain's specific
 protocol is feasible but explicitly out of scope for the POC.

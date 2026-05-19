@@ -52,7 +52,7 @@ pub fn router(state: AppState) -> Router {
 #[openapi(
     info(
         title = "hodl-sequencer HTTP API",
-        description = "Single-sequencer L2 producer for the hodlcoin POC.\n\n\
+        description = "Single-sequencer L2 producer for the hodlchain POC.\n\n\
                        Accepts mint proofs and signed transfers, builds L2 \
                        blocks (one per L1 block), commits attestations on L1 \
                        as a chain of OP_RETURN transactions.",

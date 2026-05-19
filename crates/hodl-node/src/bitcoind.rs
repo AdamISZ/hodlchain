@@ -1,5 +1,5 @@
 //! Bitcoind wrapper for the node. Read-only: tip polling and block scanning
-//! for hodlcoin OP_RETURN attestations.
+//! for hodlchain OP_RETURN attestations.
 
 use anyhow::{anyhow, bail, Context, Result};
 use bitcoin::{OutPoint, ScriptBuf, Txid};
@@ -130,12 +130,12 @@ impl NodeL1 {
 
     /// Walk every tx in L1 block `h` looking for one that spends
     /// `current_anchor`. If found, validate that vout=0 carries a
-    /// well-formed hodlcoin OP_RETURN attestation and vout=1 exists
+    /// well-formed hodlchain OP_RETURN attestation and vout=1 exists
     /// (the new anchor). Returns at most one advance per block — once
     /// the anchor is spent it can't be spent again.
     ///
     /// Failure modes returned as Err: anchor was spent by a tx that
-    /// doesn't look like a hodlcoin attestation (chain broken or
+    /// doesn't look like a hodlchain attestation (chain broken or
     /// impostor) — caller should halt.
     pub fn scan_block_for_chain_advance(
         &self,
@@ -165,7 +165,7 @@ impl NodeL1 {
                 .map_err(|e| anyhow!("L1 tx {txid} vout=0 is not an OP_RETURN: {e}"))?
                 .ok_or_else(|| {
                     anyhow!(
-                        "L1 tx {txid} spends anchor but vout=0 is not a hodlcoin \
+                        "L1 tx {txid} spends anchor but vout=0 is not a hodlchain \
                          attestation (wrong magic / length)"
                     )
                 })?;

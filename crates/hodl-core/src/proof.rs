@@ -127,7 +127,7 @@ pub trait MintProof {
 /// relative locktime `T` baked into L_spend's CSV, and a Schnorr
 /// signature binding the mint to (outpoint, l2_destination).
 ///
-/// The verifier reconstructs `L_spend`, `L_data` (with the hodlcoin
+/// The verifier reconstructs `L_spend`, `L_data` (with the hodlchain
 /// chain_id namespace stamp), the 2-leaf Merkle root and the tweaked
 /// NUMS-H output key from `(user_xonly_pubkey, lock_blocks)` alone, and
 /// compares the resulting scriptPubKey to the on-chain SPK of `outpoint`.
@@ -202,14 +202,14 @@ impl MintProof for OutpointProof {
             });
         }
 
-        // 2. scriptPubKey check: reconstruct the canonical hodlcoin
+        // 2. scriptPubKey check: reconstruct the canonical hodlchain
         //    2-leaf taproot (L_spend with this user's pk + relative
-        //    locktime T, plus L_data binding to chain_id "hodlcoin")
+        //    locktime T, plus L_data binding to chain_id "hodlchain")
         //    under NUMS H and compare. A single SPK-equality check
         //    simultaneously verifies: NUMS internal key, both leaves
         //    present, both well-formed, pk matches the signing key,
         //    `T` matches `lock_blocks`, and the namespace stamp
-        //    resolves to hodlcoin.
+        //    resolves to hodlchain.
         let expected = expected_p2tr_spk(secp, self.lock_blocks, &self.user_xonly_pubkey);
         if expected != output.script_pubkey {
             return Err(MintError::ScriptMismatch);

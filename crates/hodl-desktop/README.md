@@ -1,6 +1,6 @@
 # hodl-desktop
 
-Tauri v2 + Svelte 5 + TypeScript desktop wallet for the hodlcoin POC.
+Tauri v2 + Svelte 5 + TypeScript desktop wallet for the hodlchain POC.
 
 The Rust side is a thin Tauri wrapper around `hodl_wallet::ops::*`:
 `src/lib.rs` registers the commands; `src/commands.rs` is one
@@ -84,7 +84,7 @@ Outputs land under `target/release/bundle/<target>/`.
   embedded webview (WKWebView) ever needs a newer floor.
 - The first time you launch the unsigned `.app` or `.dmg` macOS
   Gatekeeper will block it; right-click → Open, or run
-  `xattr -dr com.apple.quarantine /Applications/hodlcoin.app`.
+  `xattr -dr com.apple.quarantine /Applications/hodlchain.app`.
   Signing + notarisation are out of scope for the POC.
 
 ### Windows notes
@@ -101,10 +101,10 @@ needing a Mac on hand. Not set up yet; happy to add when needed.
 
 ## Wallet location
 
-Linux: `$XDG_CONFIG_HOME/hodlcoin/wallet.json`
-(default `~/.config/hodlcoin/wallet.json`).
-macOS: `~/Library/Application Support/hodlcoin/wallet.json`.
-Windows: `%APPDATA%/hodlcoin/wallet.json`.
+Linux: `$XDG_CONFIG_HOME/hodlchain/wallet.json`
+(default `~/.config/hodlchain/wallet.json`).
+macOS: `~/Library/Application Support/hodlchain/wallet.json`.
+Windows: `%APPDATA%/hodlchain/wallet.json`.
 
 CLI users have `hodl-wallet --wallet <path>` to point elsewhere.
 The desktop app deliberately doesn't expose this — its wallet

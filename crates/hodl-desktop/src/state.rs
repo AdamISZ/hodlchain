@@ -6,7 +6,7 @@ use std::sync::Mutex;
 /// Tauri-managed application state.
 ///
 /// `wallets_dir` is resolved once at startup from the OS config
-/// directory (Linux `$XDG_CONFIG_HOME/hodlcoin/wallets`, etc.) and
+/// directory (Linux `$XDG_CONFIG_HOME/hodlchain/wallets`, etc.) and
 /// stays fixed for the life of the process.
 ///
 /// `current_wallet` is the *name* of the active wallet (without
@@ -23,14 +23,14 @@ impl AppState {
     pub fn init() -> Result<Self> {
         let config_dir = dirs::config_dir()
             .ok_or_else(|| anyhow!("could not resolve user config directory"))?;
-        let hodl_dir = config_dir.join("hodlcoin");
+        let hodl_dir = config_dir.join("hodlchain");
         std::fs::create_dir_all(&hodl_dir).with_context(|| {
             format!("create config dir at {}", hodl_dir.display())
         })?;
         let wallets_dir = hodl_dir.join("wallets");
 
         // One-shot migration: if the legacy pre-picker
-        // `~/.config/hodlcoin/wallet.json` exists and the new
+        // `~/.config/hodlchain/wallet.json` exists and the new
         // wallets/ dir is empty, move it to wallets/default.json so
         // it's visible in the picker.
         let legacy = hodl_dir.join("wallet.json");

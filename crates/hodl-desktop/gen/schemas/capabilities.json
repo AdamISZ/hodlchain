@@ -1,1 +1,1 @@
-{"default":{"identifier":"default","description":"Default permissions for hodlcoin wallet's main window","local":true,"windows":["main"],"permissions":["core:default"]}}
+{"default":{"identifier":"default","description":"Default permissions for hodlchain wallet's main window","local":true,"windows":["main"],"permissions":["core:default"]}}

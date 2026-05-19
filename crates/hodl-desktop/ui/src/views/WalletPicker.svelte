@@ -38,7 +38,7 @@
 </script>
 
 <main>
-  <h1>hodlcoin</h1>
+  <h1>hodlchain</h1>
   <p class="muted">pick a wallet</p>
 
   {#if err}

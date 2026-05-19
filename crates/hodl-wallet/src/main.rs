@@ -14,7 +14,7 @@ use hodl_wallet::wallet::{network_from_str, DEFAULT_WALLET_PATH};
 use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
-#[command(name = "hodl-wallet", version, about = "hodlcoin POC wallet")]
+#[command(name = "hodl-wallet", version, about = "hodlchain POC wallet")]
 struct Cli {
     /// Path to the wallet JSON file.
     #[arg(long, global = true, default_value = DEFAULT_WALLET_PATH)]

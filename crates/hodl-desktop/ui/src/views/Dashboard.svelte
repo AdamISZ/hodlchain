@@ -41,7 +41,7 @@
 
 <header class="topbar">
   <div class="left">
-    <h1>hodlcoin</h1>
+    <h1>hodlchain</h1>
     {#if session.currentWallet}
       <span class="wallet">
         <span class="muted small">wallet:</span>

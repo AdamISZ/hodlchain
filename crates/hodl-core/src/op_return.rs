@@ -80,7 +80,7 @@ impl Attestation {
             .into_script()
     }
 
-    /// Attempt to parse a scriptPubKey as a hodlcoin attestation OP_RETURN.
+    /// Attempt to parse a scriptPubKey as a hodlchain attestation OP_RETURN.
     /// Returns Ok(Some(_)) on a match, Ok(None) if it's an OP_RETURN whose
     /// payload isn't ours (wrong magic / length), or Err if the script isn't
     /// even OP_RETURN-shaped.

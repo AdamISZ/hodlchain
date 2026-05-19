@@ -27,7 +27,7 @@ CREATE TABLE IF NOT EXISTS block_witnesses (
     json TEXT NOT NULL
 );
 -- Maps each anchor outpoint to the L1 tx that spent it (i.e., the
--- next attestation tx in the hodlcoin chain). Populated by the
+-- next attestation tx in the hodlchain chain). Populated by the
 -- follower for every ChainAdvance it processes. Powers the Esplora-
 -- compatible /tx/:txid/outspend/:vout endpoint used by light clients.
 CREATE TABLE IF NOT EXISTS anchor_spends (

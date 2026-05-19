@@ -57,7 +57,7 @@
 </script>
 
 <main>
-  <h1>welcome to hodlcoin</h1>
+  <h1>welcome to hodlchain</h1>
 
   {#if mnemonic === null}
     <p class="muted">
@@ -82,7 +82,7 @@
         />
         <small class="muted">
           a–z, A–Z, 0–9, hyphen, underscore. 1–32 chars.
-          Stored as <code>~/.config/hodlcoin/wallets/&lt;name&gt;.json</code>.
+          Stored as <code>~/.config/hodlchain/wallets/&lt;name&gt;.json</code>.
         </small>
       </div>
 
