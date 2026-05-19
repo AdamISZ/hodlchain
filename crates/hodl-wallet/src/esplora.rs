@@ -107,6 +107,24 @@ impl EsploraClient {
             .with_context(|| format!("decode Outspend from {url}"))?)
     }
 
+    /// Probe whether a tx is known to this Esplora endpoint. Returns
+    /// `Ok(false)` for HTTP 404 specifically; bubbles up other HTTP
+    /// errors. Used by the light-walker as a sanity check that the
+    /// wallet's persisted anchor tx still exists on the network
+    /// before treating "outspend says unspent" as "you're at the
+    /// chain tip" (otherwise a wiped regtest datadir presents as a
+    /// silently-stalled wallet).
+    pub async fn tx_exists(&self, txid: &Txid) -> Result<bool> {
+        let url = format!("{}/tx/{}", self.base.trim_end_matches('/'), txid);
+        let resp = self.http.get(&url).send().await
+            .with_context(|| format!("GET {url}"))?;
+        match resp.status().as_u16() {
+            200..=299 => Ok(true),
+            404 => Ok(false),
+            other => bail!("{url} returned HTTP {other}"),
+        }
+    }
+
     /// Current L1 tip height. Used by the light client to compute
     /// confirmation counts for mint witness verification.
     pub async fn tip_height(&self) -> Result<u32> {
@@ -191,6 +209,24 @@ pub async fn walk_attestation_chain(
     esplora: &EsploraClient,
     anchor_0: OutPoint,
 ) -> Result<Vec<ChainStep>> {
+    // Defense-in-depth: confirm the starting anchor's tx exists on
+    // this Esplora endpoint. If it doesn't, the wallet's L1 view is
+    // out of sync with the chain — typically a wiped regtest datadir
+    // or an Esplora endpoint switch. Without this check, the wallet
+    // would silently stall: get_outspend on a non-existent txid
+    // returns `spent: false`, which the walker would interpret as
+    // "you're at the chain tip" forever.
+    if !esplora.tx_exists(&anchor_0.txid).await? {
+        bail!(
+            "wallet's L1 anchor tx {} does not exist on the configured \
+             Esplora endpoint. The wallet's chain history is no longer \
+             aligned with the network visible to this app (often because \
+             /tmp/hodl-regtest was wiped between runs, or the Esplora URL \
+             was changed). Delete the wallet file and re-run setup to \
+             reset.",
+            anchor_0.txid
+        );
+    }
     let mut steps = Vec::new();
     let mut current = anchor_0;
     loop {
