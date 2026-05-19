@@ -26,7 +26,7 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["appimage", "deb"],
+    "targets": "all",
     "category": "Finance",
     "shortDescription": "hodlcoin wallet",
     "longDescription": "Desktop wallet for the hodlcoin POC. Manages L1 mint UTXOs (deposit), L2 transfers, sparse-verification balance queries, and CSV reclaim (withdraw).",
@@ -34,6 +34,10 @@
       "icons/32x32.png",
       "icons/128x128.png",
       "icons/128x128@2x.png"
-    ]
+    ],
+    "macOS": {
+      "minimumSystemVersion": "10.15",
+      "exceptionDomain": ""
+    }
   }
 }

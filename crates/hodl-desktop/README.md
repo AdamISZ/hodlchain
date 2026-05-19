@@ -59,13 +59,45 @@ Rust dep tree — give it 5 minutes. Subsequent runs are seconds.
 cd crates/hodl-desktop && cargo tauri build
 ```
 
-Outputs (with `bundle.targets = ["appimage", "deb"]` in
-`tauri.conf.json`):
+`bundle.targets` in `tauri.conf.json` is set to `"all"`, which means
+"every bundle type supported on the current platform". Cross-builds
+aren't supported — you need to run the build *on* the OS you're
+targeting.
 
-```
-target/release/bundle/appimage/hodlcoin_0.1.0_amd64.AppImage
-target/release/bundle/deb/hodlcoin_0.1.0_amd64.deb
-```
+| Host    | Bundles produced                            |
+|---------|---------------------------------------------|
+| Linux   | `.AppImage`, `.deb` (and `.rpm` if rpmbuild is installed) |
+| macOS   | `.app`, `.dmg`                              |
+| Windows | `.exe` (NSIS), `.msi`                       |
+
+Outputs land under `target/release/bundle/<target>/`.
+
+### macOS notes
+
+- Requires the Apple developer toolchain — install Xcode Command
+  Line Tools (`xcode-select --install`).
+- Tauri auto-generates an `.icns` from the PNGs in `icons/` if you
+  don't provide one explicitly. For a polished release, run
+  `cargo tauri icon path/to/logo.png` first; it produces a proper
+  `icon.icns` (plus `.ico` for Windows) and updates the icon list.
+- `bundle.macOS.minimumSystemVersion` is set to 10.15. Bump if the
+  embedded webview (WKWebView) ever needs a newer floor.
+- The first time you launch the unsigned `.app` or `.dmg` macOS
+  Gatekeeper will block it; right-click → Open, or run
+  `xattr -dr com.apple.quarantine /Applications/hodlcoin.app`.
+  Signing + notarisation are out of scope for the POC.
+
+### Windows notes
+
+Out of scope for now. The Tauri config doesn't preclude it
+(`targets: "all"` will pick up NSIS + MSI on a Windows host) but
+nobody has built it yet.
+
+### Cross-platform CI
+
+A GitHub Actions workflow with `macos-latest` and `windows-latest`
+matrix entries is the natural way to produce releases without
+needing a Mac on hand. Not set up yet; happy to add when needed.
 
 ## Wallet location
 
