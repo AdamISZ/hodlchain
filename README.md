@@ -2,7 +2,7 @@
 
 A proof-of-concept Layer 2 anchored to Bitcoin, exploring a fair-launch
 issuance primitive: users provably commit Bitcoin via a relative
-timelock (`OP_CHECKSEQUENCEVERIFY`) on a taproot output for a chosen
+timelock (`OP_CHECKSEQUENCEVERIFY` and/or `OP_CHECKLOCKTIMEVERIFY`) on a taproot output for a chosen
 duration, and the L2 mints new tokens in return — bounded by the value
 locked and superlinear in lock duration, saturating at the locked value
 as the duration approaches infinity. The BTC is recoverable; nothing
@@ -13,8 +13,7 @@ is destroyed.
 > is the deliverable; everything in this repo runs but is shaped to
 > teach, not to ship.
 
-The conceptual spec lives in `docs/issuancev3.tex` (the working paper);
-the implementation notes are in `docs/design.md`.
+
 
 ## What's in here
 
@@ -38,8 +37,7 @@ the implementation notes are in `docs/design.md`.
 |                        | `#[tauri::command]` wrappers around `hodl_wallet::ops::*`.       |
 |                        | Excluded from `default-members` because it needs                 |
 |                        | libwebkit2gtk-4.1; see `crates/hodl-desktop/README.md`.          |
-| `docs/`                | `design.md` is the implementation companion to the paper.        |
-|                        | `issuancev*.tex` are the working paper drafts (untracked).       |
+| `docs/`                | `design.md` and some discussion of ZKPs.                         |
 | `scripts/regtest-demo.sh` | End-to-end demo against a temp bitcoind on regtest.           |
 
 ## Build
@@ -50,8 +48,7 @@ cargo test
 ```
 
 You need a recent Rust (edition 2021+). The headless daemons use
-tokio + axum; no proof-system dependencies (see
-`docs/zk-design-discussion.md` for the rationale).
+tokio + axum.
 
 For the Tauri desktop app, install the extra system / JS toolchain
 prerequisites (libwebkit2gtk-4.1-dev, libsoup-3.0-dev, Node 20+,
@@ -106,8 +103,7 @@ Press enter when done; the script tears bitcoind and the daemons down.
 
 ### Bitcoin Core path
 
-The demo defaults to `~/code/bitcoin-28.0/bin/` for the `bitcoind` and
-`bitcoin-cli` binaries. If yours is elsewhere, set:
+Set:
 
 ```bash
 BITCOIND_PREFIX=/path/to/dir ./scripts/regtest-demo.sh
@@ -141,7 +137,7 @@ If you want to follow the protocol from the bottom up:
    `main.rs` is a thin CLI shim over it. The Tauri desktop app in
    `crates/hodl-desktop` is a parallel consumer.
 
-Or read `docs/design.md` front-to-back for the design rationale.
+Or read `docs/design.md`.
 
 ## Trust posture (today)
 
@@ -169,22 +165,6 @@ What's still trusted:
 - For *mint anonymity*, full nodes also see which L1 UTXO funded a
   given mint. Future work: anonymous mint via aut-ct ring proofs.
 
-## Roadmap (rough)
-
-Working through:
-
-1. **README + housekeeping** ✓.
-2. **Direct block verification in the light client** ✓. The
-   `light-balance` command replays every L2 block from genesis,
-   verifying each signature + mint witness + state-root continuity
-   itself. See `docs/zk-design-discussion.md` for the design-space
-   survey that led to picking this over ZK validity proofs.
-3. **End-to-end desktop client** (next). A polished `egui` app
-   bundling the L1 mint flow and the L2 state-light-validating
-   wallet — the demo target for non-developer users.
-
-Beyond that: anonymity v1 via aut-ct ring proofs for mints,
-decentralised DA for block bodies, multi-sequencer.
 
 ## License
 
