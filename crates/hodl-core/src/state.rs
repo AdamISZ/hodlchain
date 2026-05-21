@@ -10,7 +10,7 @@
 //! for later; the on-chain commitment already exists.
 
 use crate::consensus::{
-    INITIAL_R, RETARGET_MAX_FACTOR, RETARGET_WINDOW_BLOCKS, TARGET_ATOMS_PER_BLOCK,
+    INITIAL_R, RETARGET_MAX_FACTOR, RETARGET_MINT_WINDOW_ATOMS, TARGET_ATOMS_PER_BLOCK,
 };
 use crate::hash::H256;
 use crate::smt;
@@ -35,13 +35,19 @@ pub struct LedgerState {
     pub accounts: BTreeMap<L2Address, Account>,
     /// Nullifier bytes, hex-encoded for portability.
     pub consumed_nullifiers: BTreeSet<String>,
-    /// Current mint-function rate parameter. Adjusted at retarget windows.
+    /// Current mint-function rate parameter. Adjusted at retarget
+    /// boundaries (cumulative atoms reaching `RETARGET_MINT_WINDOW_ATOMS`).
     pub current_r: f64,
-    /// Atoms minted in the currently-open retarget window, used to drive
-    /// the next retarget.
+    /// Atoms minted in the currently-open retarget window, used to
+    /// drive the next retarget. Retargeting is mint-paced (paper §7):
+    /// during quiet periods this stays at 0 and the loop does not
+    /// advance, so `current_r` is preserved across quiescence.
     pub current_window_atoms: u64,
-    /// First L2 block height of the currently-open retarget window.
-    pub current_window_start_height: u32,
+    /// L1 height at which the currently-open retarget window began
+    /// (= L1 height of the first L2 block in this window that
+    /// contained a mint). `None` during quiet periods — set when a
+    /// window's first mint lands; cleared when the window retargets.
+    pub current_window_start_l1_height: Option<u32>,
 }
 
 impl Default for LedgerState {
@@ -51,7 +57,7 @@ impl Default for LedgerState {
             consumed_nullifiers: BTreeSet::new(),
             current_r: INITIAL_R,
             current_window_atoms: 0,
-            current_window_start_height: 1,
+            current_window_start_l1_height: None,
         }
     }
 }
@@ -116,27 +122,62 @@ impl LedgerState {
         Ok(())
     }
 
-    /// To be called by producer / node AFTER all txs in the L2 block at
-    /// `l2_height` have been applied. If `l2_height` is a window
-    /// boundary, runs the retarget: clamps `actual / target` to
-    /// `[1/MAX_FACTOR, MAX_FACTOR]`, divides `r` by that, resets the
-    /// window counter.
+    /// Called by producer / node AFTER all txs in an L2 block have
+    /// applied. `l2_height` is the L2 block's height; `l1_height` is
+    /// the L1 block this L2 block is anchored to.
     ///
-    /// Direction: more issuance than target → ratio > 1 → r shrinks →
-    /// future mints earn less per (V,T). Bitcoin-style sign convention.
-    pub fn end_of_block(&mut self, l2_height: u32) {
-        if l2_height == 0 { return; }
-        if (l2_height as u64) % (RETARGET_WINDOW_BLOCKS as u64) != 0 { return; }
-
-        let target_total = (TARGET_ATOMS_PER_BLOCK as f64) * (RETARGET_WINDOW_BLOCKS as f64);
-        let actual_total = self.current_window_atoms as f64;
-        let raw_ratio = actual_total / target_total;
-        let clamped = raw_ratio
+    /// Mint-paced retargeting (paper §7): once cumulative atoms minted
+    /// in the current window reach `RETARGET_MINT_WINDOW_ATOMS`, the
+    /// protocol measures Δ_actual (elapsed L1 blocks from window start
+    /// to now), computes the observed atoms-per-L1-block rate, and
+    /// adjusts `r` toward the target rate, clamped to ±MAX_FACTOR.
+    ///
+    /// Direction: observed > target → ratio < 1 → r shrinks → future
+    /// mints earn less per (V,T). Symmetric the other way.
+    ///
+    /// Window-start bookkeeping: the window opens with its first
+    /// mint, so `current_window_start_l1_height` is set lazily here
+    /// (the first time this function is called with `current_window_atoms
+    /// > 0` and the field still `None`). Quiet periods leave both the
+    /// field None and the window counter 0, so retargeting genuinely
+    /// pauses — `r` is not perturbed at all.
+    pub fn end_of_block(&mut self, l2_height: u32, l1_height: u32) {
+        if l2_height == 0 {
+            return;
+        }
+        // No mints anywhere yet → nothing to do.
+        if self.current_window_atoms == 0 {
+            return;
+        }
+        // First-mint-of-window bookkeeping. The mint(s) that pushed
+        // `current_window_atoms` above zero happened in this block,
+        // so this block's L1 height is the window's L1-start.
+        if self.current_window_start_l1_height.is_none() {
+            self.current_window_start_l1_height = Some(l1_height);
+        }
+        // Retarget if this block pushed cumulative atoms past M_w.
+        if self.current_window_atoms < RETARGET_MINT_WINDOW_ATOMS {
+            return;
+        }
+        let start = self
+            .current_window_start_l1_height
+            .expect("set immediately above if it wasn't");
+        let delta_actual = l1_height.saturating_sub(start);
+        if delta_actual == 0 {
+            // Threshold crossed in the same L1 block the window
+            // opened in. Δ_actual = 0 — defer to the next block
+            // boundary, where Δ_actual will be at least 1.
+            return;
+        }
+        let m_obs = self.current_window_atoms as f64 / delta_actual as f64;
+        let m_star = TARGET_ATOMS_PER_BLOCK as f64;
+        let raw_ratio = m_star / m_obs;
+        let ratio = raw_ratio
             .max(1.0 / RETARGET_MAX_FACTOR)
             .min(RETARGET_MAX_FACTOR);
-        self.current_r /= clamped;
+        self.current_r *= ratio;
         self.current_window_atoms = 0;
-        self.current_window_start_height = l2_height + 1;
+        self.current_window_start_l1_height = None;
     }
 
     fn apply_transfer<C: Verification>(
@@ -201,7 +242,7 @@ impl LedgerState {
             nullifiers_hash: self.nullifiers_hash(),
             current_r: self.current_r,
             current_window_atoms: self.current_window_atoms,
-            current_window_start_height: self.current_window_start_height,
+            current_window_start_l1_height: self.current_window_start_l1_height,
         }
     }
 
@@ -238,21 +279,33 @@ pub struct StateComponents {
     pub nullifiers_hash: H256,
     pub current_r: f64,
     pub current_window_atoms: u64,
-    pub current_window_start_height: u32,
+    /// L1 height at which the currently-open mint-paced retarget
+    /// window began. `None` during quiet periods (no mints in
+    /// progress).
+    pub current_window_start_l1_height: Option<u32>,
 }
 
 impl StateComponents {
-    /// Canonical state-root hash. Same byte layout as
-    /// `LedgerState::state_root`.
+    /// Canonical state-root hash. v2 — the retarget tail encodes the
+    /// window-start L1 height as a tag + payload so the `None` case
+    /// has a distinct byte representation.
     pub fn state_root(&self) -> H256 {
         let mut h = Sha256::new();
-        h.update(b"hodl-state-v1");
+        h.update(b"hodl-state-v2");
         h.update(&self.accounts_root.0);
         h.update(&self.nullifiers_hash.0);
         h.update(b"|retarget|");
         h.update(&self.current_r.to_le_bytes());
         h.update(&self.current_window_atoms.to_be_bytes());
-        h.update(&self.current_window_start_height.to_be_bytes());
+        match self.current_window_start_l1_height {
+            Some(h1) => {
+                h.update([1u8]);
+                h.update(&h1.to_be_bytes());
+            }
+            None => {
+                h.update([0u8]);
+            }
+        }
         H256(h.finalize().into())
     }
 }
@@ -279,13 +332,15 @@ mod tests {
         let outpoint = OutPoint::new(Txid::all_zeros(), 0);
         let secp = Secp256k1::new();
         let (pk, _) = signing_kp.x_only_public_key();
-        let sighash = OutpointProof::sighash(&outpoint, &dest);
+        let claimed_h = 2u32;
+        let sighash = OutpointProof::sighash(&outpoint, claimed_h, &dest);
         let msg = bitcoin::secp256k1::Message::from_digest(sighash);
         let sig: schnorr::Signature = secp.sign_schnorr(&msg, signing_kp);
         let witness = MintProofEnvelope::V0Outpoint(OutpointProof {
             outpoint,
             user_xonly_pubkey: pk,
             lock_blocks: 99,
+            claimed_block_height: claimed_h,
             signature: sig,
         });
         MintEntry {
@@ -302,46 +357,107 @@ mod tests {
     }
 
     #[test]
-    fn retarget_at_window_boundary() {
-        let target_total =
-            (TARGET_ATOMS_PER_BLOCK as f64) * (RETARGET_WINDOW_BLOCKS as f64);
-
-        // Overshoot by 2x: ratio = 2, r halves.
+    fn retarget_quiet_period_does_not_advance() {
+        // The whole point of mint-paced retargeting: with no mints,
+        // end_of_block must be a no-op. r is preserved across any
+        // number of empty blocks.
         let mut state = LedgerState::new();
         let r0 = state.current_r;
-        state.current_window_atoms = (target_total * 2.0) as u64;
-        state.end_of_block(RETARGET_WINDOW_BLOCKS);
-        assert!((state.current_r - r0 / 2.0).abs() < 1e-15);
+        for l1 in 1..=10_000 {
+            state.end_of_block(l1, l1);
+        }
+        assert_eq!(state.current_r, r0);
         assert_eq!(state.current_window_atoms, 0);
-        assert_eq!(state.current_window_start_height, RETARGET_WINDOW_BLOCKS + 1);
+        assert_eq!(state.current_window_start_l1_height, None);
+    }
 
-        // Overshoot by 100x: clamped to 4x, r divides by 4.
+    #[test]
+    fn retarget_genesis_block_is_noop() {
         let mut state = LedgerState::new();
         let r0 = state.current_r;
-        state.current_window_atoms = (target_total * 100.0) as u64;
-        state.end_of_block(RETARGET_WINDOW_BLOCKS);
-        assert!((state.current_r - r0 / 4.0).abs() < 1e-15);
-
-        // Undershoot to zero: clamped to 0.25, r multiplies by 4.
-        let mut state = LedgerState::new();
-        let r0 = state.current_r;
-        state.current_window_atoms = 0;
-        state.end_of_block(RETARGET_WINDOW_BLOCKS);
-        assert!((state.current_r - r0 * 4.0).abs() < 1e-15);
-
-        // Mid-window: no retarget.
-        let mut state = LedgerState::new();
-        let r0 = state.current_r;
-        state.current_window_atoms = 999_999_999;
-        state.end_of_block(RETARGET_WINDOW_BLOCKS - 1);
+        state.current_window_atoms = RETARGET_MINT_WINDOW_ATOMS * 10;
+        state.end_of_block(0, 999);
         assert_eq!(state.current_r, r0);
-        assert_eq!(state.current_window_atoms, 999_999_999);
+    }
 
-        // Genesis (height 0): no retarget even if height % W == 0.
+    #[test]
+    fn retarget_first_mint_anchors_window_start() {
+        // Cumulative atoms goes from 0 → below-threshold at L1=200.
+        // No retarget yet, but window_start gets set.
         let mut state = LedgerState::new();
+        state.current_window_atoms = RETARGET_MINT_WINDOW_ATOMS / 4; // below
         let r0 = state.current_r;
-        state.end_of_block(0);
+        state.end_of_block(1, 200);
         assert_eq!(state.current_r, r0);
+        assert_eq!(state.current_window_start_l1_height, Some(200));
+        assert_eq!(state.current_window_atoms, RETARGET_MINT_WINDOW_ATOMS / 4);
+    }
+
+    #[test]
+    fn retarget_defers_when_delta_is_zero() {
+        // The threshold is crossed in the same L1 block the window
+        // opened in. Δ_actual = 0; must defer to the next block.
+        let mut state = LedgerState::new();
+        state.current_window_atoms = RETARGET_MINT_WINDOW_ATOMS * 2;
+        let r0 = state.current_r;
+        state.end_of_block(1, 200);
+        // Window-start has been set to 200 but retarget deferred.
+        assert_eq!(state.current_window_start_l1_height, Some(200));
+        assert_eq!(state.current_r, r0);
+        assert_eq!(state.current_window_atoms, RETARGET_MINT_WINDOW_ATOMS * 2);
+    }
+
+    #[test]
+    fn retarget_observed_at_target_leaves_r_unchanged() {
+        // Δ_actual chosen so M_obs = M*. Ratio = 1, r stays.
+        let mut state = LedgerState::new();
+        state.current_window_atoms = RETARGET_MINT_WINDOW_ATOMS;
+        state.current_window_start_l1_height = Some(100);
+        let r0 = state.current_r;
+        // delta_actual such that current_window_atoms / delta_actual = M*
+        let delta = (RETARGET_MINT_WINDOW_ATOMS / TARGET_ATOMS_PER_BLOCK) as u32;
+        state.end_of_block(2, 100 + delta);
+        assert!((state.current_r - r0).abs() < 1e-15);
+        assert_eq!(state.current_window_atoms, 0);
+        assert_eq!(state.current_window_start_l1_height, None);
+    }
+
+    #[test]
+    fn retarget_observed_above_target_decreases_r() {
+        // delta_actual = half the healthy figure → M_obs = 2 × M* →
+        // ratio = 0.5 → r halves (and that's within clamp).
+        let mut state = LedgerState::new();
+        state.current_window_atoms = RETARGET_MINT_WINDOW_ATOMS;
+        state.current_window_start_l1_height = Some(100);
+        let r0 = state.current_r;
+        let delta = (RETARGET_MINT_WINDOW_ATOMS / TARGET_ATOMS_PER_BLOCK / 2) as u32;
+        state.end_of_block(2, 100 + delta);
+        assert!((state.current_r - r0 * 0.5).abs() < 1e-12);
+    }
+
+    #[test]
+    fn retarget_observed_below_target_increases_r() {
+        // delta_actual = double the healthy figure → M_obs = M*/2 →
+        // ratio = 2 → r doubles (right at the clamp).
+        let mut state = LedgerState::new();
+        state.current_window_atoms = RETARGET_MINT_WINDOW_ATOMS;
+        state.current_window_start_l1_height = Some(100);
+        let r0 = state.current_r;
+        let delta = (RETARGET_MINT_WINDOW_ATOMS / TARGET_ATOMS_PER_BLOCK * 2) as u32;
+        state.end_of_block(2, 100 + delta);
+        assert!((state.current_r - r0 * 2.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn retarget_clamp_pins_at_max_factor() {
+        // Extreme overshoot (mints happened in 1 block) → ratio ~tiny
+        // → clamped to 1/MAX_FACTOR → r divides by MAX_FACTOR exactly.
+        let mut state = LedgerState::new();
+        state.current_window_atoms = RETARGET_MINT_WINDOW_ATOMS * 1000;
+        state.current_window_start_l1_height = Some(100);
+        let r0 = state.current_r;
+        state.end_of_block(2, 101);
+        assert!((state.current_r - r0 / RETARGET_MAX_FACTOR).abs() < 1e-12);
     }
 
     #[test]

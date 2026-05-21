@@ -91,6 +91,12 @@ pub enum MintError {
     ValueMismatch { onchain: u64, claimed: u64 },
     #[error("mint amount underflowed/overflowed")]
     AmountOverflow,
+    #[error("claimed height {claimed} is before lock creation height {create}")]
+    ClaimedHeightBeforeCreate { claimed: u32, create: u32 },
+    #[error("lock expired: claimed height {claimed} >= unlock height {unlock}")]
+    LockExpired { claimed: u32, unlock: u32 },
+    #[error("claimed height {claimed} is in the future (L1 tip is {tip})")]
+    ClaimedHeightInFuture { claimed: u32, tip: u32 },
 }
 
 /// The credit a successful mint produces, ready to be embedded into a block.
@@ -145,19 +151,33 @@ pub struct OutpointProof {
     pub user_xonly_pubkey: XOnlyPublicKey,
     /// Relative locktime T baked into L_spend's CSV.
     pub lock_blocks: u32,
-    /// Schnorr signature over `sha256("hodl-mint-v0" || outpoint || l2_destination)`. Hex.
+    /// L1 block height the locker claims to be submitting at. The
+    /// verifier requires `T_create ≤ claimed_height < T_create + T`
+    /// (active lock period, paper §3) and `claimed_height ≤ L1 tip`.
+    /// Bound into the sighash so a stale request can't be replayed
+    /// outside its claimed window.
+    pub claimed_block_height: u32,
+    /// Schnorr signature over `sha256("hodl-mint-v1" || outpoint || claimed_block_height_be || l2_destination)`.
     #[cfg_attr(feature = "std", schema(value_type = String))]
     pub signature: schnorr::Signature,
 }
 
 impl OutpointProof {
-    /// Canonical sighash bound by the V0 proof:
-    /// `sha256("hodl-mint-v0" || outpoint || l2_destination)`
-    pub fn sighash(outpoint: &OutPoint, l2_destination: &L2Address) -> [u8; 32] {
+    /// Canonical sighash bound by the v1 proof:
+    /// `sha256("hodl-mint-v1" || outpoint || claimed_block_height_be || l2_destination)`.
+    /// Paper §3 defines the message as
+    /// `m = (outpoint(u), h, L2-destination)`; the v1 tag-bump from
+    /// v0 reflects the addition of `h`.
+    pub fn sighash(
+        outpoint: &OutPoint,
+        claimed_block_height: u32,
+        l2_destination: &L2Address,
+    ) -> [u8; 32] {
         let mut h = Sha256::new();
-        h.update(b"hodl-mint-v0");
+        h.update(b"hodl-mint-v1");
         h.update(AsRef::<[u8]>::as_ref(&outpoint.txid));
         h.update(&outpoint.vout.to_le_bytes());
+        h.update(&claimed_block_height.to_be_bytes());
         h.update(&l2_destination.serialize());
         h.finalize().into()
     }
@@ -202,7 +222,33 @@ impl MintProof for OutpointProof {
             });
         }
 
-        // 2. scriptPubKey check: reconstruct the canonical hodlchain
+        // 2. Active lock period (paper §3 verification): the
+        //    claimed_block_height must lie in the half-open interval
+        //    [T_create, T_create + T), and must not exceed the
+        //    current L1 tip (no future-dated mints).
+        let create = output.confirmed_height;
+        let unlock = create.saturating_add(self.lock_blocks);
+        if self.claimed_block_height < create {
+            return Err(MintError::ClaimedHeightBeforeCreate {
+                claimed: self.claimed_block_height,
+                create,
+            });
+        }
+        if self.claimed_block_height >= unlock {
+            return Err(MintError::LockExpired {
+                claimed: self.claimed_block_height,
+                unlock,
+            });
+        }
+        let tip = l1.tip_height();
+        if self.claimed_block_height > tip {
+            return Err(MintError::ClaimedHeightInFuture {
+                claimed: self.claimed_block_height,
+                tip,
+            });
+        }
+
+        // 3. scriptPubKey check: reconstruct the canonical hodlchain
         //    2-leaf taproot (L_spend with this user's pk + relative
         //    locktime T, plus L_data binding to chain_id "hodlchain")
         //    under NUMS H and compare. A single SPK-equality check
@@ -215,8 +261,14 @@ impl MintProof for OutpointProof {
             return Err(MintError::ScriptMismatch);
         }
 
-        // 3. Signature check.
-        let sighash = Self::sighash(&self.outpoint, &l2_destination);
+        // 4. Signature check. The sighash binds the claimed_block_height,
+        //    so a stale request can't be replayed outside the window
+        //    the signer asserted.
+        let sighash = Self::sighash(
+            &self.outpoint,
+            self.claimed_block_height,
+            &l2_destination,
+        );
         let msg = Message::from_digest(sighash);
         secp.verify_schnorr(&self.signature, &msg, &self.user_xonly_pubkey)
             .map_err(|_| MintError::BadSignature)?;
@@ -337,7 +389,8 @@ mod tests {
         let dest_kp = Keypair::new(&secp, &mut bitcoin::secp256k1::rand::thread_rng());
         let (l2_dest, _) = dest_kp.x_only_public_key();
 
-        let msg_digest = OutpointProof::sighash(&outpoint, &l2_dest);
+        let claimed_h = create_h + 1; // inside the active lock period
+        let msg_digest = OutpointProof::sighash(&outpoint, claimed_h, &l2_dest);
         let msg = Message::from_digest(msg_digest);
         let sig = secp.sign_schnorr(&msg, &kp);
 
@@ -345,6 +398,7 @@ mod tests {
             outpoint,
             user_xonly_pubkey: xonly,
             lock_blocks,
+            claimed_block_height: claimed_h,
             signature: sig,
         };
 
@@ -380,12 +434,14 @@ mod tests {
         let (l2_dest, _) = dest_kp.x_only_public_key();
 
         // B forges a (well-formed) proof claiming the SPK is for B.
-        let msg = Message::from_digest(OutpointProof::sighash(&outpoint, &l2_dest));
+        let claimed_h = 101u32;
+        let msg = Message::from_digest(OutpointProof::sighash(&outpoint, claimed_h, &l2_dest));
         let sig_b = secp.sign_schnorr(&msg, &kp_b);
         let proof = OutpointProof {
             outpoint,
             user_xonly_pubkey: pk_b,
             lock_blocks,
+            claimed_block_height: claimed_h,
             signature: sig_b,
         };
         let err = proof
@@ -406,7 +462,8 @@ mod tests {
         let dest_kp = Keypair::new(&secp, &mut bitcoin::secp256k1::rand::thread_rng());
         let (l2_dest, _) = dest_kp.x_only_public_key();
 
-        let msg = Message::from_digest(OutpointProof::sighash(&outpoint, &l2_dest));
+        let claimed_h = 101u32;
+        let msg = Message::from_digest(OutpointProof::sighash(&outpoint, claimed_h, &l2_dest));
         let sig = secp.sign_schnorr(&msg, &kp);
 
         for bad in [0u32, MAX_LOCK_BLOCKS + 1, u32::MAX] {
@@ -414,6 +471,7 @@ mod tests {
                 outpoint,
                 user_xonly_pubkey: xonly,
                 lock_blocks: bad,
+                claimed_block_height: claimed_h,
                 signature: sig,
             };
             let err = proof
@@ -421,5 +479,67 @@ mod tests {
                 .unwrap_err();
             assert!(matches!(err, MintError::BadLockBlocks { .. }), "bad={bad}");
         }
+    }
+
+    #[test]
+    fn outpoint_proof_rejects_after_lock_expiry() {
+        let secp = Secp256k1::new();
+        let kp = Keypair::new(&secp, &mut bitcoin::secp256k1::rand::thread_rng());
+        let (xonly, _) = kp.x_only_public_key();
+        let lock_blocks = 50u32;
+        let create_h = 100u32;
+        let (spk, _) = derive_mint_taproot(&secp, lock_blocks, &xonly);
+        let outpoint = OutPoint::new(Txid::all_zeros(), 0);
+        let l1 = fake_l1_with(outpoint, 1_000_000_000, spk, create_h);
+
+        let dest_kp = Keypair::new(&secp, &mut bitcoin::secp256k1::rand::thread_rng());
+        let (l2_dest, _) = dest_kp.x_only_public_key();
+
+        // Unlock height is create_h + lock_blocks = 150; claim *at* 150
+        // which is the first block the lock would be releasable.
+        let claimed_h = create_h + lock_blocks;
+        let msg = Message::from_digest(OutpointProof::sighash(&outpoint, claimed_h, &l2_dest));
+        let sig = secp.sign_schnorr(&msg, &kp);
+        let proof = OutpointProof {
+            outpoint,
+            user_xonly_pubkey: xonly,
+            lock_blocks,
+            claimed_block_height: claimed_h,
+            signature: sig,
+        };
+        let err = proof
+            .verify(&secp, &l1, l2_dest, crate::consensus::DEFAULT_R)
+            .unwrap_err();
+        assert!(matches!(err, MintError::LockExpired { .. }));
+    }
+
+    #[test]
+    fn outpoint_proof_rejects_future_dated_claim() {
+        let secp = Secp256k1::new();
+        let kp = Keypair::new(&secp, &mut bitcoin::secp256k1::rand::thread_rng());
+        let (xonly, _) = kp.x_only_public_key();
+        let lock_blocks = 1000u32;
+        let create_h = 100u32;
+        let (spk, _) = derive_mint_taproot(&secp, lock_blocks, &xonly);
+        let outpoint = OutPoint::new(Txid::all_zeros(), 0);
+        // Fake L1 tip is 200; claim a height after that.
+        let l1 = fake_l1_with(outpoint, 1_000_000_000, spk, create_h);
+
+        let dest_kp = Keypair::new(&secp, &mut bitcoin::secp256k1::rand::thread_rng());
+        let (l2_dest, _) = dest_kp.x_only_public_key();
+        let claimed_h = 500u32; // > tip=200, still < create_h+lock=1100
+        let msg = Message::from_digest(OutpointProof::sighash(&outpoint, claimed_h, &l2_dest));
+        let sig = secp.sign_schnorr(&msg, &kp);
+        let proof = OutpointProof {
+            outpoint,
+            user_xonly_pubkey: xonly,
+            lock_blocks,
+            claimed_block_height: claimed_h,
+            signature: sig,
+        };
+        let err = proof
+            .verify(&secp, &l1, l2_dest, crate::consensus::DEFAULT_R)
+            .unwrap_err();
+        assert!(matches!(err, MintError::ClaimedHeightInFuture { .. }));
     }
 }

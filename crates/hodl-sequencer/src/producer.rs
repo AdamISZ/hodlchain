@@ -127,7 +127,7 @@ impl Producer {
         // Retarget happens AFTER txs apply, at the block-end boundary.
         // This shifts state_clone.current_r if new_height is a window
         // boundary; the state root reflects the post-retarget r.
-        state_clone.end_of_block(new_height);
+        state_clone.end_of_block(new_height, l1_height);
 
         let txs_root = L2Block::compute_txs_root(&txs);
         let state_root = state_clone.state_root();

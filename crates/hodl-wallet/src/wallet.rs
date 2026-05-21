@@ -309,7 +309,7 @@ pub struct VerifiedHead {
     pub consumed_nullifiers: BTreeSet<String>,
     pub current_r: f64,
     pub current_window_atoms: u64,
-    pub current_window_start_height: u32,
+    pub current_window_start_l1_height: Option<u32>,
 }
 
 #[cfg(test)]

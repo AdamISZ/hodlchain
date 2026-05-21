@@ -179,7 +179,7 @@ pub async fn bootstrap(
         consumed_nullifiers,
         current_r: bal.state_components.current_r,
         current_window_atoms: bal.state_components.current_window_atoms,
-        current_window_start_height: bal.state_components.current_window_start_height,
+        current_window_start_l1_height: bal.state_components.current_window_start_l1_height,
     })
 }
 
@@ -313,14 +313,14 @@ async fn step_forward<C: bitcoin::secp256k1::Verification>(
     sparse_ls.consumed_nullifiers = head.consumed_nullifiers.clone();
     sparse_ls.current_r = head.current_r;
     sparse_ls.current_window_atoms = head.current_window_atoms;
-    sparse_ls.current_window_start_height = head.current_window_start_height;
+    sparse_ls.current_window_start_l1_height = head.current_window_start_l1_height;
 
     for (i, tx) in block.txs.iter().enumerate() {
         sparse_ls.apply(secp, tx).map_err(|e| {
             anyhow!("tx #{i} in block {height} failed apply on sparse state: {e}")
         })?;
     }
-    sparse_ls.end_of_block(height);
+    sparse_ls.end_of_block(height, block.header.l1_height);
 
     // ---- 4. Sparse SMT update for the new accounts_root ----
     let updates: Vec<smt::Update> = witness
@@ -357,7 +357,7 @@ async fn step_forward<C: bitcoin::secp256k1::Verification>(
         nullifiers_hash: sparse_ls.nullifiers_hash(),
         current_r: sparse_ls.current_r,
         current_window_atoms: sparse_ls.current_window_atoms,
-        current_window_start_height: sparse_ls.current_window_start_height,
+        current_window_start_l1_height: sparse_ls.current_window_start_l1_height,
     };
     let new_state_root = new_components.state_root();
     if new_state_root != block.header.state_root {
@@ -397,7 +397,7 @@ async fn step_forward<C: bitcoin::secp256k1::Verification>(
         consumed_nullifiers: sparse_ls.consumed_nullifiers,
         current_r: sparse_ls.current_r,
         current_window_atoms: sparse_ls.current_window_atoms,
-        current_window_start_height: sparse_ls.current_window_start_height,
+        current_window_start_l1_height: sparse_ls.current_window_start_l1_height,
     })
 }
 

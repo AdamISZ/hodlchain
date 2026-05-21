@@ -59,19 +59,37 @@ pub const INITIAL_R: f64 = 1.0 / 26_280.0;
 /// Backwards-compat alias. Prefer `INITIAL_R` going forward.
 pub const DEFAULT_R: f64 = INITIAL_R;
 
-/// Target L2-token issuance rate, in atoms per L1 block. Retargeting
-/// adjusts `r` so that the rolling average over a window approaches this.
+/// Target L2-token issuance rate, in atoms per L1 block.
+/// Equivalent to `M^*` in §7 of the paper. Retargeting adjusts `r`
+/// so that the *observed* rate inside each mint-paced window
+/// approaches this value.
 pub const TARGET_ATOMS_PER_BLOCK: u64 = 50_000_000;
 
-/// Retarget window in L1/L2 blocks (one L2 block per L1 block).
-/// ~1 day at 10 min/block — short enough to demo on regtest/signet.
-/// Production-scale deployments would use months, per `issuancev2.tex` §4.
-pub const RETARGET_WINDOW_BLOCKS: u32 = 144;
+/// Retarget window size, in cumulative atoms minted. Equivalent to
+/// `M_w` in §7 of the paper. Once cumulative `mint_fn` output within
+/// the current window reaches this threshold, the protocol measures
+/// elapsed L1 blocks (Δ_actual) and adjusts `r`.
+///
+/// On a healthy chain minting at `TARGET_ATOMS_PER_BLOCK` exactly,
+/// the window completes in
+/// `RETARGET_MINT_WINDOW_ATOMS / TARGET_ATOMS_PER_BLOCK` L1 blocks.
+/// At the values here (216_000_000_000 / 50_000_000 = 4320 blocks
+/// ≈ 1 month at 10 min/block), this matches the paper's "windows
+/// of months rather than weeks" recommendation, and is long enough
+/// that locks-in-flight have time to respond to `r` changes before
+/// the next retarget.
+///
+/// Crucially this is *mint-paced*, not block-paced: during quiet
+/// periods (no mints) the loop does not advance, and `r` stays at
+/// whatever the last retarget established. See paper §7.
+pub const RETARGET_MINT_WINDOW_ATOMS: u64 = 216_000_000_000;
 
-/// Per-window maximum multiplicative change of `r`, in either direction.
+/// Per-window multiplicative cap on `r` adjustment.
 /// `r_new ∈ [r_old / RETARGET_MAX_FACTOR, r_old * RETARGET_MAX_FACTOR]`.
-/// Same shape as Bitcoin's difficulty 4× clamp.
-pub const RETARGET_MAX_FACTOR: f64 = 4.0;
+/// Paper §7 argues for 2 (not Bitcoin's 4), because the L2's
+/// short-range quadratic value-of-time dependence makes a tighter
+/// clamp appropriate.
+pub const RETARGET_MAX_FACTOR: f64 = 2.0;
 
 /// L2 native-token atomic unit per BTC sat. The mint function returns
 /// L2 atoms; we use a 1:1 mapping for the POC so that f(V,T) <= V trivially.

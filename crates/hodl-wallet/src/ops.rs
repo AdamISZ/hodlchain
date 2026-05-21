@@ -315,16 +315,25 @@ pub async fn mint_message(wallet_path: &Path, input: MintMessageInput) -> Result
     let l2_destination = input.to.unwrap_or(l2_identity);
 
     // Sign the mint message with the L1 mint key that the mint UTXO
-    // commits to (via `user_pk` in L_spend).
+    // commits to (via `user_pk` in L_spend). The signed message
+    // includes the current L1 tip height as `claimed_block_height`
+    // (paper §3, `m = (outpoint, h, L2-destination)`), so the
+    // verifier can enforce the active-lock-period bound.
     let mint_kp = wf.mint_keypair(&secp, record.bip32_index)?;
     let mint_xonly = mint_kp.x_only_public_key().0;
-    let sighash = OutpointProof::sighash(&outpoint, &l2_destination);
+    let esplora = EsploraClient::new(wf.esplora_url.clone());
+    let claimed_block_height = esplora
+        .tip_height()
+        .await
+        .context("query L1 tip for mint message claimed_block_height")?;
+    let sighash = OutpointProof::sighash(&outpoint, claimed_block_height, &l2_destination);
     let msg = Message::from_digest(sighash);
     let signature = secp.sign_schnorr(&msg, &mint_kp);
     let proof = OutpointProof {
         outpoint,
         user_xonly_pubkey: mint_xonly,
         lock_blocks: record.lock_blocks,
+        claimed_block_height,
         signature,
     };
 

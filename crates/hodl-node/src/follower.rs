@@ -148,7 +148,7 @@ impl Follower {
                 .apply(&secp, tx)
                 .map_err(|e| anyhow!("tx in block {} invalid: {e}", block.header.height))?;
         }
-        next_state.end_of_block(block.header.height);
+        next_state.end_of_block(block.header.height, block.header.l1_height);
 
         // Continuity + state-root sanity.
         let computed_state_root = next_state.state_root();
