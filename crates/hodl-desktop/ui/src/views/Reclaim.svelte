@@ -111,8 +111,9 @@
         <li class="card">
           <div class="spread">
             <div>
-              <div>
+              <div class="header">
                 <strong>#{m.bip32_index}</strong>
+                <span class="badge badge-{m.status}">{m.status.toUpperCase()}</span>
                 <span class="muted">T={m.lock_blocks} blocks</span>
                 {#if m.value_sat != null}
                   <span class="muted">· {m.value_sat} sat</span>
@@ -231,7 +232,37 @@
   }
   .status-reclaimed {
     color: var(--color-text-muted);
-    text-decoration: line-through;
+  }
+  .header {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: var(--space-2);
+  }
+  .badge {
+    display: inline-block;
+    padding: 0.1rem 0.5rem;
+    border-radius: 999px;
+    font-size: 0.75rem;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    border: 1px solid currentColor;
+  }
+  .badge-pending {
+    color: var(--color-text-muted);
+    background: transparent;
+  }
+  .badge-locked {
+    color: var(--color-warning);
+    background: #fffbeb;
+  }
+  .badge-ready {
+    color: var(--color-success);
+    background: #f0fdf4;
+  }
+  .badge-reclaimed {
+    color: var(--color-text-muted);
+    background: var(--color-bg);
   }
   .overlay {
     position: fixed;
