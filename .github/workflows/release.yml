@@ -75,7 +75,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: linux-release
+          # Include the Ubuntu version: rust-cache's default key uses
+          # `runner.os` ("Linux") which doesn't differentiate 22.04
+          # from 24.04, so a cache from a 24.04 run would otherwise
+          # pollute a 22.04 build with build-script binaries linked
+          # against the newer glibc.
+          shared-key: ubuntu-22.04-release
       - name: build
         run: |
           cargo build --release \
@@ -179,7 +184,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: linux-release
+          # Include the Ubuntu version: rust-cache's default key uses
+          # `runner.os` ("Linux") which doesn't differentiate 22.04
+          # from 24.04, so a cache from a 24.04 run would otherwise
+          # pollute a 22.04 build with build-script binaries linked
+          # against the newer glibc.
+          shared-key: ubuntu-22.04-release
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
