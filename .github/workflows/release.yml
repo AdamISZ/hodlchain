@@ -63,7 +63,13 @@ jobs:
   build-backend-linux:
     name: backend (linux-x86_64)
     needs: validate
-    runs-on: ubuntu-24.04
+    # Build on 22.04 (glibc 2.35) for broad downstream compatibility.
+    # CLI binaries have no Tauri / webkit dependency — they only need
+    # rust + libc, so the older runner is the right choice. Anyone
+    # with glibc >= 2.35 (≈ everything since Ubuntu 22.04, Debian 12,
+    # Fedora 36) can run them. The GUI job has to stay on 24.04
+    # because libwebkit2gtk-4.1 isn't packaged for 22.04.
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -150,13 +156,15 @@ jobs:
   build-gui-linux:
     name: gui (linux-x86_64)
     needs: validate
-    runs-on: ubuntu-24.04
+    # 22.04 keeps the glibc floor at 2.35 — same as the backend job —
+    # so a single Linux glibc baseline applies to all our artifacts.
+    # libwebkit2gtk-4.1-dev is shipped via jammy-updates/universe
+    # (2.50.4 as of 2026); no PPA needed on stock GH Actions runners.
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
       - name: install tauri system deps
-        # libwebkit2gtk-4.1-dev requires 24.04+ — we pin runs-on
-        # above accordingly. Keep this list in sync with
-        # crates/hodl-desktop/README.md.
+        # Keep this list in sync with crates/hodl-desktop/README.md.
         run: |
           sudo apt-get update
           sudo apt-get install -y \
