@@ -310,6 +310,13 @@ pub struct VerifiedHead {
     pub current_r: f64,
     pub current_window_atoms: u64,
     pub current_window_start_l1_height: Option<u32>,
+    /// Running tally of all atoms ever minted on the chain. Seeded
+    /// from `BalanceResponse.total_minted_atoms` at cold-start
+    /// bootstrap (sequencer-trusted), then accumulated locally
+    /// from block witnesses during walk-forward. Not part of any
+    /// state-root commitment — purely for stats display.
+    #[serde(default)]
+    pub total_minted_atoms: u64,
 }
 
 #[cfg(test)]

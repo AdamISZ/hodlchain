@@ -8,6 +8,7 @@
   import Mint from "./views/Mint.svelte";
   import Transfer from "./views/Transfer.svelte";
   import Reclaim from "./views/Reclaim.svelte";
+  import BlockchainOverview from "./views/BlockchainOverview.svelte";
 
   let bootErr = $state<string | null>(null);
 
@@ -53,6 +54,8 @@
   <Transfer />
 {:else if session.view === "reclaim"}
   <Reclaim />
+{:else if session.view === "overview"}
+  <BlockchainOverview />
 {/if}
 
 <style>

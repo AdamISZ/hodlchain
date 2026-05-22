@@ -622,6 +622,17 @@ pub struct LightBalanceOutput {
     pub balance: u64,
     pub nonce: u64,
     pub is_own_address: bool,
+    /// Mint-function rate parameter at this verified head.
+    pub current_r: f64,
+    /// Atoms minted in the currently-open retarget window. Compare
+    /// against `RETARGET_MINT_WINDOW_ATOMS` to gauge progress.
+    pub current_window_atoms: u64,
+    /// L1 height at which the current retarget window opened. `None`
+    /// during quiet periods (no mints in flight).
+    pub current_window_start_l1_height: Option<u32>,
+    /// Total atoms ever minted on this chain. See VerifiedHead for
+    /// trust caveat (sequencer-trusted on cold-start, verified after).
+    pub total_minted_atoms: u64,
 }
 
 pub async fn light_balance(wallet_path: &Path, input: LightBalanceInput) -> Result<LightBalanceOutput> {
@@ -643,7 +654,7 @@ pub async fn light_balance(wallet_path: &Path, input: LightBalanceInput) -> Resu
         }
     }
 
-    let (head, mode, blocks_verified) = match wf.verified_head.take() {
+    let (mut head, mode, blocks_verified) = match wf.verified_head.take() {
         None => {
             let h = verify::bootstrap(&api, &esplora, own_addr).await?;
             let (h, n) = verify::walk_forward(h, &api, &esplora).await?;
@@ -654,6 +665,19 @@ pub async fn light_balance(wallet_path: &Path, input: LightBalanceInput) -> Resu
             (h, LightBalanceMode::WarmStart, n)
         }
     };
+
+    // One-time top-up for wallets that persisted a `VerifiedHead`
+    // before `total_minted_atoms` existed: the field defaults to 0
+    // under `#[serde(default)]`, and warm-start walks only add the
+    // per-block mint amounts of *new* L2 blocks (history is not
+    // replayed). Detect the heuristic "field reads zero but chain is
+    // non-empty" and seed from /balance. Trust model on this path
+    // matches cold-start bootstrap; no-op if the chain genuinely has
+    // zero supply.
+    if head.total_minted_atoms == 0 && head.l2_height > 0 {
+        let bal = api.balance(&own_addr).await?;
+        head.total_minted_atoms = bal.total_minted_atoms;
+    }
 
     let (balance, nonce) = if target == own_addr {
         verify::balance_from(&head, &own_addr)
@@ -693,6 +717,10 @@ pub async fn light_balance(wallet_path: &Path, input: LightBalanceInput) -> Resu
         balance,
         nonce,
         is_own_address: target == own_addr,
+        current_r: head.current_r,
+        current_window_atoms: head.current_window_atoms,
+        current_window_start_l1_height: head.current_window_start_l1_height,
+        total_minted_atoms: head.total_minted_atoms,
     };
 
     // Persist the (possibly-advanced) verified head before returning.

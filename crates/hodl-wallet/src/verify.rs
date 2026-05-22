@@ -180,6 +180,7 @@ pub async fn bootstrap(
         current_r: bal.state_components.current_r,
         current_window_atoms: bal.state_components.current_window_atoms,
         current_window_start_l1_height: bal.state_components.current_window_start_l1_height,
+        total_minted_atoms: bal.total_minted_atoms,
     })
 }
 
@@ -314,6 +315,7 @@ async fn step_forward<C: bitcoin::secp256k1::Verification>(
     sparse_ls.current_r = head.current_r;
     sparse_ls.current_window_atoms = head.current_window_atoms;
     sparse_ls.current_window_start_l1_height = head.current_window_start_l1_height;
+    sparse_ls.total_minted_atoms = head.total_minted_atoms;
 
     for (i, tx) in block.txs.iter().enumerate() {
         sparse_ls.apply(secp, tx).map_err(|e| {
@@ -398,6 +400,7 @@ async fn step_forward<C: bitcoin::secp256k1::Verification>(
         current_r: sparse_ls.current_r,
         current_window_atoms: sparse_ls.current_window_atoms,
         current_window_start_l1_height: sparse_ls.current_window_start_l1_height,
+        total_minted_atoms: sparse_ls.total_minted_atoms,
     })
 }
 

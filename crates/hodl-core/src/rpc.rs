@@ -99,4 +99,11 @@ pub struct BalanceResponse {
     /// SMT inclusion (or non-inclusion) proof for `address` against
     /// `state_components.accounts_root`.
     pub proof: InclusionProof,
+    /// Total atoms ever minted on this ledger. Equal to the sum of
+    /// every account balance (transfers are conservative). Not part
+    /// of `state_components` / state_root — exposed for stats panels.
+    /// Light clients trust this only at bootstrap; subsequent updates
+    /// are accumulated by walking block witnesses.
+    #[serde(default)]
+    pub total_minted_atoms: Amount,
 }

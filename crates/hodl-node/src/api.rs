@@ -150,6 +150,7 @@ async fn get_balance(
     let proof = state.account_inclusion_proof(addr);
     let components = state.components();
     let state_root = components.state_root();
+    let total_minted_atoms = state.total_minted_atoms;
     Ok(Json(BalanceResponse {
         address: addr,
         balance,
@@ -158,6 +159,7 @@ async fn get_balance(
         state_root,
         state_components: components,
         proof,
+        total_minted_atoms,
     }))
 }
 

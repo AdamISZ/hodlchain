@@ -48,6 +48,12 @@ pub struct LedgerState {
     /// contained a mint). `None` during quiet periods — set when a
     /// window's first mint lands; cleared when the window retargets.
     pub current_window_start_l1_height: Option<u32>,
+    /// Running sum of every mint amount this ledger has ever applied.
+    /// Equal to the total L2 supply at any point in time (transfers
+    /// are conservative). Not part of `StateComponents` / state_root
+    /// — exposed via RPC for stats / UI panels only; light clients
+    /// accumulate it independently during block walks.
+    pub total_minted_atoms: u64,
 }
 
 impl Default for LedgerState {
@@ -58,6 +64,7 @@ impl Default for LedgerState {
             current_r: INITIAL_R,
             current_window_atoms: 0,
             current_window_start_l1_height: None,
+            total_minted_atoms: 0,
         }
     }
 }
@@ -119,6 +126,7 @@ impl LedgerState {
         let acct = self.accounts.entry(ev.l2_destination).or_default();
         acct.balance = acct.balance.saturating_add(ev.amount);
         self.current_window_atoms = self.current_window_atoms.saturating_add(ev.amount);
+        self.total_minted_atoms = self.total_minted_atoms.saturating_add(ev.amount);
         Ok(())
     }
 
