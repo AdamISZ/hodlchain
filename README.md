@@ -13,7 +13,16 @@ is destroyed.
 > is the deliverable; everything in this repo runs but is shaped to
 > teach, not to ship.
 
+![hodlchain desktop wallet overview tab](docs/screenshot-overview.png)
 
+## Quick start
+
+- **Run the headless daemons + CLI wallet from source** →
+  [`docs/build-from-source.md`](docs/build-from-source.md)
+- **Use the desktop wallet (download release artifact)** →
+  [`docs/run-the-gui.md`](docs/run-the-gui.md)
+
+Both Linux and macOS are covered in each doc.
 
 ## What's in here
 
@@ -37,80 +46,41 @@ is destroyed.
 |                        | `#[tauri::command]` wrappers around `hodl_wallet::ops::*`.       |
 |                        | Excluded from `default-members` because it needs                 |
 |                        | libwebkit2gtk-4.1; see `crates/hodl-desktop/README.md`.          |
-| `docs/`                | `design.md` and some discussion of ZKPs.                         |
+| `crates/hodl-regtest`  | Cross-platform CLI that orchestrates a local regtest backend     |
+|                        | (bitcoind + sequencer + node) with start/stop/mine/fund/reset    |
+|                        | subcommands. Persistent datadir. Ships in releases alongside     |
+|                        | the GUI.                                                         |
+| `docs/`                | `design.md`, build instructions, GUI instructions, ZKP           |
+|                        | discussion, paper PDFs.                                          |
 | `scripts/regtest-demo.sh` | End-to-end demo against a temp bitcoind on regtest.           |
 
-## Build
+## Build and run
+
+For full setup instructions on Linux and macOS, see
+[`docs/build-from-source.md`](docs/build-from-source.md) (headless
+daemons + CLI) and [`docs/run-the-gui.md`](docs/run-the-gui.md)
+(desktop wallet against a local regtest backend).
+
+The 30-second version, if you already have Rust and `bitcoind` v22+
+installed:
 
 ```bash
-cargo build       # headless crates (hodl-core/wallet/sequencer/node)
-cargo test
-```
+git clone https://github.com/AdamISZ/hodlchain
+cd hodlchain
+cargo build --release
 
-You need a recent Rust (edition 2021+). The headless daemons use
-tokio + axum.
-
-For the Tauri desktop app, install the extra system / JS toolchain
-prerequisites (libwebkit2gtk-4.1-dev, libsoup-3.0-dev, Node 20+,
-pnpm, `cargo install tauri-cli --version "^2"`) and then build via
-`cd crates/hodl-desktop && cargo tauri dev`.
-
-## See it run
-
-The full end-to-end flow against a fresh regtest bitcoind:
-
-```bash
+# scripted end-to-end smoke test (alice + bob, 15 seconds):
 ./scripts/regtest-demo.sh
+
+# OR persistent local backend you can drive with the desktop wallet:
+./target/release/hodl-regtest start
 ```
 
-What it does (~15 seconds):
-
-1. Spins up `bitcoind` in `/tmp/hodl-regtest`, creates a sequencer-funding
-   wallet and a user wallet, mines 102 blocks.
-2. Starts `hodl-sequencer` (port 28080) and `hodl-node` (port 28081).
-3. Runs two `hodl-wallet`s (Alice + Bob) through:
-   - Alice creates a CSV-locked taproot mint UTXO (P2TR, NUMS internal
-     key, two-leaf tap tree per the paper, 0.1 BTC, T = 10000 blocks).
-   - Submits a mint message; sequencer verifies the witness against L1,
-     credits Alice ≈ 564,057 L2 atoms.
-   - Alice transfers 141,014 atoms to Bob; both balances settle.
-4. Verifies Alice's balance three ways:
-   - **`balance`** — trusts the response.
-   - **`verify-balance`** — re-derives `state_root` from the response's
-     state-components, verifies the SMT inclusion proof, checks the
-     leaf matches the reported balance/nonce.
-   - **`light-balance`** — walks the L1 attestation chain via the
-     node's Esplora-compatible endpoints, then *replays every L2
-     block from genesis*: re-verifies every transfer signature, every
-     mint witness (against L1 via Esplora), and recomputes the
-     state_root at every height. The reported balance is read out of
-     the locally-rebuilt `LedgerState`. End-to-end light-client
-     verification with no bitcoind RPC from the wallet.
-
-To leave the daemons running so you can browse the API docs:
-
-```bash
-./scripts/regtest-demo.sh --keep-running
-```
-
-Then while it's paused at "press enter to tear down":
-
-- Sequencer Swagger UI: <http://127.0.0.1:28080/docs/>
-- Node Swagger UI: <http://127.0.0.1:28081/docs/>
-- Raw OpenAPI: `/openapi.json` on either daemon.
-
-Press enter when done; the script tears bitcoind and the daemons down.
-
-### Bitcoin Core path
-
-Set:
-
-```bash
-BITCOIND_PREFIX=/path/to/dir ./scripts/regtest-demo.sh
-```
-
-or supply both binaries explicitly via `BITCOIND_BIN` and
-`BITCOIN_CLI_BIN`. Any Bitcoin Core >= v22 should work.
+`hodl-regtest start` brings up `bitcoind` (regtest) plus
+`hodl-sequencer` (port 28080) and `hodl-node` (port 28081), mines 102
+blocks so the local user wallet has spendable funds, and persists
+state across restarts. See `hodl-regtest --help` for the full
+subcommand list (`mine`, `fund`, `stop`, `status`, `reset`, `logs`).
 
 ## Reading the code
 

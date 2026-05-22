@@ -1,0 +1,23 @@
+[package]
+name = "hodl-regtest"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "hodl-regtest"
+path = "src/main.rs"
+
+[dependencies]
+clap = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true, features = ["std"] }
+serde_json = { workspace = true }
+# Blocking HTTP is fine — every operation in this tool is short-lived
+# and meant to be invoked from a terminal.
+reqwest = { version = "0.12", features = ["blocking", "json", "rustls-tls"], default-features = false }
+# For Unix signals (SIGTERM/SIGKILL) and process-alive checks via
+# kill(pid, 0). Trivially conditional in main.rs; we don't ship a
+# Windows build today.
+libc = "0.2"

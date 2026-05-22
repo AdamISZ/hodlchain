@@ -6,6 +6,7 @@ members = [
     "crates/hodl-sequencer",
     "crates/hodl-node",
     "crates/hodl-desktop",
+    "crates/hodl-regtest",
 ]
 # Plain `cargo check`/`cargo test`/`cargo build` only touches the
 # headless crates. The Tauri app pulls in heavier system dependencies
@@ -18,6 +19,7 @@ default-members = [
     "crates/hodl-wallet",
     "crates/hodl-sequencer",
     "crates/hodl-node",
+    "crates/hodl-regtest",
 ]
 
 [workspace.package]
