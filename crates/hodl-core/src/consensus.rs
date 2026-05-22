@@ -51,10 +51,19 @@ pub const BIP341_NUMS_H_XONLY: [u8; 32] = [
 
 /// Initial rate parameter for `mint_fn`, in units of 1 / L1-block.
 ///
-/// Chosen so the inflection point T = 1/r sits at ~6 months of blocks
-/// (~26_280 blocks). The active value of `r` is consensus state — it
-/// lives in `LedgerState::current_r` and shifts at retarget windows.
-pub const INITIAL_R: f64 = 1.0 / 26_280.0;
+/// **Demo / regtest value.** Set to `1.0 / 1000.0` so that `rT ≈ 1`
+/// for a 1000-block lock — short locks now produce visible f_mint
+/// output in the calculator and in the actual mints, which makes
+/// the overview tab useful during interactive sessions on a chain
+/// where blocks are mined on demand.
+///
+/// **Planned mainnet value:** `1.0 / 26_280.0`, putting the
+/// inflection point T = 1/r at ~6 months of blocks. Restore before
+/// any production launch.
+///
+/// The active value of `r` is consensus state — it lives in
+/// `LedgerState::current_r` and shifts at retarget windows.
+pub const INITIAL_R: f64 = 1.0 / 1_000.0;
 
 /// Backwards-compat alias. Prefer `INITIAL_R` going forward.
 pub const DEFAULT_R: f64 = INITIAL_R;
@@ -63,7 +72,14 @@ pub const DEFAULT_R: f64 = INITIAL_R;
 /// Equivalent to `M^*` in §7 of the paper. Retargeting adjusts `r`
 /// so that the *observed* rate inside each mint-paced window
 /// approaches this value.
-pub const TARGET_ATOMS_PER_BLOCK: u64 = 50_000_000;
+///
+/// **Demo / regtest value:** `1_000_000` atoms/block. Only the ratio
+/// `RETARGET_MINT_WINDOW_ATOMS / TARGET_ATOMS_PER_BLOCK` matters for
+/// chain dynamics; both have been scaled down by 50× from the
+/// planned mainnet figures so the displayed numbers stay readable.
+///
+/// **Planned mainnet value:** `50_000_000`.
+pub const TARGET_ATOMS_PER_BLOCK: u64 = 1_000_000;
 
 /// Retarget window size, in cumulative atoms minted. Equivalent to
 /// `M_w` in §7 of the paper. Once cumulative `mint_fn` output within
@@ -73,16 +89,22 @@ pub const TARGET_ATOMS_PER_BLOCK: u64 = 50_000_000;
 /// On a healthy chain minting at `TARGET_ATOMS_PER_BLOCK` exactly,
 /// the window completes in
 /// `RETARGET_MINT_WINDOW_ATOMS / TARGET_ATOMS_PER_BLOCK` L1 blocks.
-/// At the values here (216_000_000_000 / 50_000_000 = 4320 blocks
-/// ≈ 1 month at 10 min/block), this matches the paper's "windows
-/// of months rather than weeks" recommendation, and is long enough
-/// that locks-in-flight have time to respond to `r` changes before
-/// the next retarget.
+///
+/// **Demo / regtest value:** `100_000_000` atoms — with the matching
+/// `TARGET_ATOMS_PER_BLOCK = 1_000_000`, the window closes after
+/// ~100 L1 blocks of issuance, so retargets are reachable inside an
+/// interactive demo session.
+///
+/// **Planned mainnet value:** `216_000_000_000` atoms. With the
+/// mainnet `TARGET_ATOMS_PER_BLOCK = 50_000_000`, that's 4320 blocks
+/// ≈ 1 month at 10 min/block — matching the paper's "windows of
+/// months rather than weeks" recommendation, and long enough that
+/// locks-in-flight have time to respond to `r` changes.
 ///
 /// Crucially this is *mint-paced*, not block-paced: during quiet
 /// periods (no mints) the loop does not advance, and `r` stays at
 /// whatever the last retarget established. See paper §7.
-pub const RETARGET_MINT_WINDOW_ATOMS: u64 = 216_000_000_000;
+pub const RETARGET_MINT_WINDOW_ATOMS: u64 = 100_000_000;
 
 /// Per-window multiplicative cap on `r` adjustment.
 /// `r_new ∈ [r_old / RETARGET_MAX_FACTOR, r_old * RETARGET_MAX_FACTOR]`.

@@ -24,8 +24,16 @@ export function mintFn(valueSat: number, lockBlocks: number, r: number): number 
   return Math.floor(valueSat * ratio);
 }
 
-/** Cumulative atoms required to close one retarget window (paper §7 M_w). */
-export const RETARGET_MINT_WINDOW_ATOMS = 216_000_000_000;
+/**
+ * Cumulative atoms required to close one retarget window (paper §7 M_w).
+ *
+ * Demo / regtest value. Planned mainnet value: 216_000_000_000.
+ */
+export const RETARGET_MINT_WINDOW_ATOMS = 100_000_000;
 
-/** Target atom issuance per L1 block (paper §7 M*). */
-export const TARGET_ATOMS_PER_BLOCK = 50_000_000;
+/**
+ * Target atom issuance per L1 block (paper §7 M*).
+ *
+ * Demo / regtest value. Planned mainnet value: 50_000_000.
+ */
+export const TARGET_ATOMS_PER_BLOCK = 1_000_000;
