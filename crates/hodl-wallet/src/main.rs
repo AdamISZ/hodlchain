@@ -84,6 +84,13 @@ struct KeygenArgs {
     /// hodl-node's slim Esplora-compatible subset.
     #[arg(long)]
     esplora_url: String,
+    /// Path to a file containing a BIP39 mnemonic to *restore* from
+    /// instead of generating a fresh one. The file's contents are
+    /// trimmed and parsed as a phrase (any valid BIP39 word count
+    /// works). Useful for porting a wallet between machines or
+    /// recovering after a config wipe.
+    #[arg(long)]
+    from_mnemonic_file: Option<PathBuf>,
     /// Overwrite an existing wallet file at the target path.
     #[arg(long)]
     force: bool,
@@ -190,6 +197,13 @@ async fn main() -> Result<()> {
 
 fn cmd_keygen(wallet_path: &std::path::Path, args: KeygenArgs) -> Result<()> {
     let network = network_from_str(&args.network)?;
+    let mnemonic = match args.from_mnemonic_file {
+        Some(path) => Some(
+            std::fs::read_to_string(&path)
+                .with_context(|| format!("read mnemonic file {}", path.display()))?,
+        ),
+        None => None,
+    };
     let out = ops::keygen(
         wallet_path,
         ops::KeygenInput {
@@ -197,13 +211,18 @@ fn cmd_keygen(wallet_path: &std::path::Path, args: KeygenArgs) -> Result<()> {
             sequencer_url: args.sequencer_url,
             node_url: args.node_url,
             esplora_url: args.esplora_url,
+            mnemonic,
             force: args.force,
         },
     )?;
     println!("wrote {}", wallet_path.display());
     println!("L2 address: {}", hex::encode(out.l2_address.serialize()));
     println!();
-    println!("BIP39 mnemonic (24 words) — back this up:");
+    if out.was_fresh {
+        println!("BIP39 mnemonic (24 words) — back this up:");
+    } else {
+        println!("restored from supplied BIP39 mnemonic:");
+    }
     println!("  {}", out.mnemonic);
     Ok(())
 }

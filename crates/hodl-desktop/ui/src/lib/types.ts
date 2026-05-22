@@ -20,12 +20,20 @@ export interface KeygenInput {
   node_url?: string | null;
   /** Required. Mempool.space / electrs / hodl-node URL. */
   esplora_url: string;
+  /**
+   * Optional BIP39 mnemonic to *restore* from. When omitted/null,
+   * the backend generates a fresh 24-word phrase. When supplied,
+   * the backend validates it (full checksum check via the bip39
+   * crate) and uses it to derive the wallet's keys.
+   */
+  mnemonic?: string | null;
   force: boolean;
 }
 
 export interface KeygenOutput {
   l2_address: string;     // x-only pubkey, 32-byte hex
-  mnemonic: string;       // BIP39 24-word phrase
+  mnemonic: string;       // BIP39 phrase (echoed back)
+  was_fresh: boolean;     // true = newly generated, false = restored from input
 }
 
 // ---------- mints ----------

@@ -3,6 +3,7 @@
   import * as api from "../lib/api";
   import type { ReclaimableMint, ReclaimMintOutput } from "../lib/types";
   import { go } from "../lib/state.svelte";
+  import AddressBox from "../lib/components/AddressBox.svelte";
 
   let mints = $state<ReclaimableMint[]>([]);
   let busy = $state(false);
@@ -117,7 +118,9 @@
                   <span class="muted">· {m.value_sat} sat</span>
                 {/if}
               </div>
-              <div class="muted small mono">{m.mint_address}</div>
+              <div class="addr-line">
+                <AddressBox value={m.mint_address} size="compact" />
+              </div>
               {#if m.outpoint}
                 <div class="muted small mono">{m.outpoint}</div>
               {/if}
@@ -151,7 +154,7 @@
         tabindex="-1"
       >
         <h3>reclaim mint #{dialog.bip32_index}</h3>
-        <p class="muted small mono">{dialog.mint_address}</p>
+        <AddressBox value={dialog.mint_address} size="compact" />
         <div class="field">
           <label for="dest">destination L1 address</label>
           <input
@@ -212,6 +215,9 @@
   }
   .small {
     font-size: 0.85rem;
+  }
+  .addr-line {
+    margin: var(--space-1) 0;
   }
   .status-ready {
     color: var(--color-success);

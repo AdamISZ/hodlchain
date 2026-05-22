@@ -3,6 +3,7 @@
   import * as api from "../lib/api";
   import type { LightBalanceOutput } from "../lib/types";
   import { go, session } from "../lib/state.svelte";
+  import AddressBox from "../lib/components/AddressBox.svelte";
 
   let head = $state<LightBalanceOutput | null>(null);
   let busy = $state(false);
@@ -88,11 +89,12 @@
         <dd>{head.l1_height}</dd>
         <dt>nonce</dt>
         <dd>{head.nonce}</dd>
-        <dt>address</dt>
-        <dd class="mono small">{head.address}</dd>
         <dt>state_root</dt>
         <dd class="mono small">{head.state_root}</dd>
       </dl>
+      <div class="address-row">
+        <AddressBox value={head.address} label="L2 address" size="compact" />
+      </div>
     </div>
 
     <div class="row">
@@ -161,6 +163,9 @@
     margin: 0 0 var(--space-3);
     font-size: 0.95rem;
     color: var(--color-text-muted);
+  }
+  .address-row {
+    margin-top: var(--space-3);
   }
   dl {
     display: grid;

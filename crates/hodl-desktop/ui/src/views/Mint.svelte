@@ -7,6 +7,7 @@
     MintMessageOutput,
   } from "../lib/types";
   import { go } from "../lib/state.svelte";
+  import AddressBox from "../lib/components/AddressBox.svelte";
 
   // Three-stage flow:
   //
@@ -132,7 +133,7 @@
       <p>
         Send any BTC amount to this address from your normal wallet:
       </p>
-      <div class="deposit mono">{utxo.mint_address}</div>
+      <AddressBox value={utxo.mint_address} />
       <dl>
         <dt>bip32_index</dt>
         <dd>{utxo.bip32_index}</dd>
@@ -225,15 +226,6 @@
     display: flex;
     flex-direction: column;
     gap: var(--space-4);
-  }
-  .deposit {
-    background: #fef3c7;
-    border: 1px solid #fcd34d;
-    padding: var(--space-3);
-    border-radius: var(--radius);
-    font-size: 0.95rem;
-    word-break: break-all;
-    user-select: all;
   }
   dl {
     display: grid;

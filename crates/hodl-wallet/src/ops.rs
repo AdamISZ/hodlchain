@@ -47,17 +47,26 @@ pub struct KeygenInput {
     /// Required: Esplora HTTP base URL. The wallet's only L1 data
     /// source.
     pub esplora_url: String,
+    /// Optional BIP39 mnemonic phrase. When `None` we generate a
+    /// fresh 24-word mnemonic. When `Some`, we validate the supplied
+    /// phrase via `bip39::Mnemonic::from_str` (full checksum check)
+    /// and use it to derive the wallet's keys — i.e. **restore** a
+    /// wallet from a previously-backed-up phrase.
+    #[serde(default)]
+    pub mnemonic: Option<String>,
     pub force: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
 pub struct KeygenOutput {
     pub l2_address: XOnlyPublicKey,
-    /// The freshly-generated BIP39 mnemonic. **Display once at setup,
-    /// invite the user to back it up.** It's also persisted to the
-    /// wallet file; this field exists so UIs can surface it without
-    /// re-reading the file.
+    /// The wallet's BIP39 mnemonic. Echoed back so UIs can display
+    /// it once for backup (fresh wallets) or simply confirm the
+    /// caller-supplied phrase was accepted (restored wallets).
     pub mnemonic: String,
+    /// `true` if the wallet was created fresh; `false` if restored
+    /// from a caller-supplied mnemonic.
+    pub was_fresh: bool,
 }
 
 pub fn keygen(wallet_path: &Path, input: KeygenInput) -> Result<KeygenOutput> {
@@ -68,8 +77,18 @@ pub fn keygen(wallet_path: &Path, input: KeygenInput) -> Result<KeygenOutput> {
         );
     }
     let secp = Secp256k1::new();
-    let mnemonic = Mnemonic::generate(24).context("generate BIP39 mnemonic")?;
-    let phrase = mnemonic.to_string();
+    let (phrase, was_fresh) = match input.mnemonic {
+        Some(supplied) => {
+            // Full BIP39 validation (wordlist + checksum) happens here.
+            let mnemonic =
+                Mnemonic::from_str(supplied.trim()).context("parse supplied BIP39 mnemonic")?;
+            (mnemonic.to_string(), false)
+        }
+        None => {
+            let mnemonic = Mnemonic::generate(24).context("generate BIP39 mnemonic")?;
+            (mnemonic.to_string(), true)
+        }
+    };
     let wf = WalletFile {
         network: input.network,
         mnemonic: phrase.clone(),
@@ -85,6 +104,7 @@ pub fn keygen(wallet_path: &Path, input: KeygenInput) -> Result<KeygenOutput> {
     Ok(KeygenOutput {
         l2_address,
         mnemonic: phrase,
+        was_fresh,
     })
 }
 
