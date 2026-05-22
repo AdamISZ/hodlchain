@@ -14,8 +14,14 @@ data/
 # safety net if you ever move it inside the repo.
 /tmp/hodl-regtest/
 
-# Paper drafts and LaTeX build artifacts. Only the design markdown
-# files are tracked.
-docs/*
-!docs/design.md
-!docs/zk-design-discussion.md
+# LaTeX build artifacts + draft PDFs under docs/. Markdown docs
+# and any other source files there are NOT ignored — only the
+# LaTeX intermediates and the published PDFs (regenerable from .tex,
+# and the .tex sources live elsewhere).
+docs/*.aux
+docs/*.log
+docs/*.out
+docs/*.synctex.gz
+docs/*.toc
+docs/*.pdf
+docs/*.tex
