@@ -1,7 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "hodlchain",
-  "version": "0.1.0",
   "identifier": "com.hodlchain.wallet",
   "build": {
     "frontendDist": "ui/dist",

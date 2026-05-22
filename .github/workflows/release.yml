@@ -1,0 +1,266 @@
+name: release
+
+# Fires on a `vX.Y.Z` tag push. Builds backend tarballs + GUI bundles
+# on Linux and macOS in parallel, then aggregates everything into a
+# DRAFT GitHub Release. Publishing + GPG signing happens manually
+# afterward — the signing key never touches CI.
+#
+# `workflow_dispatch` lets you exercise the workflow on a branch
+# without cutting a release; the aggregate / draft-release step is
+# skipped in that mode.
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write   # required by softprops/action-gh-release
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ----------------------------------------------------------------
+  # 0. validate that the pushed tag matches workspace.package.version
+  # ----------------------------------------------------------------
+  validate:
+    name: validate version
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: tag ↔ workspace.package.version check
+        # Only enforced on tag-triggered runs. workflow_dispatch can
+        # be used to exercise the build pipeline without a tag.
+        run: |
+          set -eu
+          if [ "${GITHUB_REF}" = "${GITHUB_REF#refs/tags/v}" ]; then
+            echo "not a tag push; skipping version check"
+            exit 0
+          fi
+          REF="${GITHUB_REF##*/}"
+          VERSION="${REF#v}"
+          # workspace.package.version is the one source of truth.
+          # Every crate inherits via `version.workspace = true`, and
+          # tauri.conf.json drops its own version field so the GUI
+          # bundle picks up the same value.
+          CARGO_VERSION=$(grep -A 5 '^\[workspace.package\]' Cargo.toml \
+                          | grep '^version' \
+                          | head -1 \
+                          | sed 's/.*"\(.*\)".*/\1/')
+          echo "tag version:        $VERSION"
+          echo "Cargo.toml version: $CARGO_VERSION"
+          if [ "$VERSION" != "$CARGO_VERSION" ]; then
+            echo "::error::tag ${REF} (version ${VERSION}) does not match \
+                  workspace.package.version (${CARGO_VERSION}). Bump it in \
+                  Cargo.toml before tagging."
+            exit 1
+          fi
+
+  # ----------------------------------------------------------------
+  # 1a. backend tarball — Linux x86_64
+  # ----------------------------------------------------------------
+  build-backend-linux:
+    name: backend (linux-x86_64)
+    needs: validate
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: linux-release
+      - name: build
+        run: |
+          cargo build --release \
+            -p hodl-regtest \
+            -p hodl-sequencer \
+            -p hodl-node \
+            -p hodl-wallet
+      - name: package
+        id: package
+        run: |
+          set -eu
+          mkdir staging
+          cp target/release/hodl-regtest staging/
+          cp target/release/hodl-sequencer staging/
+          cp target/release/hodl-node staging/
+          cp target/release/hodl-wallet staging/
+          REF="${GITHUB_REF##*/}"
+          VERSION="${REF#v}"
+          # On workflow_dispatch GITHUB_REF is the branch — fall back
+          # to a -dev suffix so the artifact name is still well-formed.
+          if [ "$VERSION" = "$REF" ]; then VERSION="dev-${GITHUB_SHA:0:7}"; fi
+          OUT="hodlchain-backend-linux-x86_64-${VERSION}.tar.gz"
+          tar -czf "${OUT}" -C staging .
+          echo "out=${OUT}" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: backend-linux-x86_64
+          path: ${{ steps.package.outputs.out }}
+          if-no-files-found: error
+
+  # ----------------------------------------------------------------
+  # 1b. backend tarball — macOS aarch64 (Apple Silicon)
+  # ----------------------------------------------------------------
+  build-backend-macos:
+    name: backend (macos-aarch64)
+    needs: validate
+    # macos-latest = arm64 since macos-14. Apple Silicon only —
+    # x86_64 Macs are a vanishingly small share of the install base
+    # for this kind of POC; revisit if anyone asks.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: macos-release
+      - name: build
+        run: |
+          cargo build --release \
+            -p hodl-regtest \
+            -p hodl-sequencer \
+            -p hodl-node \
+            -p hodl-wallet
+      - name: package
+        id: package
+        run: |
+          set -eu
+          mkdir staging
+          cp target/release/hodl-regtest staging/
+          cp target/release/hodl-sequencer staging/
+          cp target/release/hodl-node staging/
+          cp target/release/hodl-wallet staging/
+          REF="${GITHUB_REF##*/}"
+          VERSION="${REF#v}"
+          if [ "$VERSION" = "$REF" ]; then VERSION="dev-${GITHUB_SHA:0:7}"; fi
+          OUT="hodlchain-backend-macos-aarch64-${VERSION}.tar.gz"
+          tar -czf "${OUT}" -C staging .
+          echo "out=${OUT}" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: backend-macos-aarch64
+          path: ${{ steps.package.outputs.out }}
+          if-no-files-found: error
+
+  # ----------------------------------------------------------------
+  # 2a. GUI bundle — Linux (AppImage + .deb)
+  # ----------------------------------------------------------------
+  build-gui-linux:
+    name: gui (linux-x86_64)
+    needs: validate
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: install tauri system deps
+        # libwebkit2gtk-4.1-dev requires 24.04+ — we pin runs-on
+        # above accordingly. Keep this list in sync with
+        # crates/hodl-desktop/README.md.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libsoup-3.0-dev \
+            libssl-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            pkg-config \
+            build-essential
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: linux-release
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+      - name: install JS deps
+        working-directory: crates/hodl-desktop/ui
+        run: pnpm install --frozen-lockfile
+      - name: install tauri CLI
+        # `--locked` so we don't accidentally pull a newer minor.
+        # rust-cache picks up ~/.cargo/bin so this is fast on
+        # subsequent runs.
+        run: cargo install tauri-cli --version "^2" --locked
+      - name: build GUI bundles
+        working-directory: crates/hodl-desktop
+        run: cargo tauri build --bundles appimage,deb
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gui-linux-x86_64
+          path: |
+            target/release/bundle/appimage/*.AppImage
+            target/release/bundle/deb/*.deb
+          if-no-files-found: error
+
+  # ----------------------------------------------------------------
+  # 2b. GUI bundle — macOS aarch64 (.dmg)
+  # ----------------------------------------------------------------
+  build-gui-macos:
+    name: gui (macos-aarch64)
+    needs: validate
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: macos-release
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+      - name: install JS deps
+        working-directory: crates/hodl-desktop/ui
+        run: pnpm install --frozen-lockfile
+      - name: install tauri CLI
+        run: cargo install tauri-cli --version "^2" --locked
+      - name: build GUI bundle
+        working-directory: crates/hodl-desktop
+        # Unsigned .dmg. Notarisation requires Apple Developer
+        # Program ($99/yr) + signing identity + extra Tauri config —
+        # out of scope until there's user demand. The docs already
+        # describe the `xattr -dr com.apple.quarantine` workaround.
+        run: cargo tauri build --bundles dmg
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gui-macos-aarch64
+          path: target/release/bundle/dmg/*.dmg
+          if-no-files-found: error
+
+  # ----------------------------------------------------------------
+  # 3. aggregate everything into a draft GitHub Release
+  # ----------------------------------------------------------------
+  release:
+    name: draft github release
+    needs:
+      - build-backend-linux
+      - build-backend-macos
+      - build-gui-linux
+      - build-gui-macos
+    runs-on: ubuntu-24.04
+    # Only when tag-triggered. workflow_dispatch builds artifacts
+    # for inspection but does not touch the Releases tab.
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: list artifacts
+        run: ls -la artifacts/
+      - name: create draft release
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          # Release notes intentionally blank — fill in manually
+          # before publishing, alongside attaching the .asc GPG
+          # signatures you create locally.
+          files: artifacts/**
+          fail_on_unmatched_files: true
