@@ -1619,7 +1619,7 @@ checksum = "3011d1213f159867b13cfd6ac92d2cd5f1345762c63be3554e84092d85a50bbd"
 
 [[package]]
 name = "hodl-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "bitcoin",
  "hex",
@@ -1635,7 +1635,7 @@ dependencies = [
 
 [[package]]
 name = "hodl-desktop"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "bitcoin",
@@ -1654,7 +1654,7 @@ dependencies = [
 
 [[package]]
 name = "hodl-node"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -1678,7 +1678,7 @@ dependencies = [
 
 [[package]]
 name = "hodl-regtest"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -1690,7 +1690,7 @@ dependencies = [
 
 [[package]]
 name = "hodl-sequencer"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -1714,7 +1714,7 @@ dependencies = [
 
 [[package]]
 name = "hodl-wallet"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "bip39",
