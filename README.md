@@ -13,7 +13,7 @@ is destroyed.
 > is the deliverable; everything in this repo runs but is shaped to
 > teach, not to ship.
 
-![hodlchain desktop wallet overview tab](docs/screenshot-overview.png)
+![hodlchain desktop wallet — blockchain overview tab showing chain head, total minted supply, current r, and retarget-window progress](docs/overviewtab.png)
 
 ## Quick start
 

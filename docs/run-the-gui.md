@@ -114,7 +114,9 @@ On first launch you'll see the wizard. Fill in:
 - **Esplora URL** — `http://127.0.0.1:28081`.
 
 Click **create wallet**, back up the 24-word phrase, then
-**continue** to the dashboard.
+**continue** to the dashboard:
+
+![hodlchain dashboard: balance in atoms, verified head with L2/L1 heights, and the wallet's L2 address with copy/QR buttons](dashboardtab.png)
 
 ---
 
@@ -193,8 +195,11 @@ verified head at L2 height 0. To actually try the mint loop:
    ```
 6. Click **refresh** on the dashboard — your balance should
    populate. The exact amount depends on the active `r` and your
-   chosen `T`; the **overview** tab has a calculator if you want
-   to predict it first.
+   chosen `T`; the **overview** tab has a live snapshot of both,
+   plus a mint calculator you can use to predict the result of
+   future deposits:
+
+   ![blockchain overview tab: chain head, total minted supply, current r and retarget-window progress, mint calculator](overviewtab.png)
 
 After your lock blocks elapse you can spend the deposit back to any
 L1 address from the **reclaim** tab. Use
@@ -231,7 +236,17 @@ discovery.
   `hodl-regtest` that crashed without a clean `stop`, run
   `./hodl-regtest stop` to clear stale state.
 - **AppImage won't run on Linux** — `chmod +x` it. If you see
-  `dlopen failed: libfuse.so.2`, `sudo apt install libfuse2`.
+  `dlopen failed: libfuse.so.2`, install libfuse 2:
+  `sudo apt install libfuse2` on Ubuntu 22.04, or `libfuse2t64`
+  on 24.04+ (newer Ubuntu/Debian renamed the package).
+- **AppImage errors about `libwebkit2gtk-4.1.so.0` / `libgdk-3.so.0`
+  / `libsoup-3.0.so.0` etc.** — the GUI depends on system webkit2gtk
+  4.1. On Ubuntu 22.04 it's in `jammy-updates/universe` (enabled by
+  default — `sudo apt install libwebkit2gtk-4.1-0` if missing). On
+  Debian 12+, Fedora 38+, and current rolling distros the package is
+  in the main repos. If you're on an older distro that only ships
+  webkit2gtk-4.0, the AppImage won't run — you'd need to either build
+  from source against your installed webkit or upgrade the distro.
 - **GUI shows "could not start"** — the backend isn't reachable on
   the URLs you typed. Run `./hodl-regtest status`; if everything's
   stopped, `start` it.
