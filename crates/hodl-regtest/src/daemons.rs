@@ -62,6 +62,10 @@ pub fn write_seq_config(layout: &Layout, l1_genesis: u32) -> Result<()> {
         "listen": format!("127.0.0.1:{}", SEQUENCER_PORT),
         "db_path": layout.seq_db().to_string_lossy(),
         "poll_ms": 500,
+        // Faster than the mainnet-target 30s so the regtest demo
+        // chain feels responsive — users running `mine 1` shouldn't
+        // wait half a minute to see an L2 block.
+        "block_interval_ms": 2_000,
     });
     std::fs::write(layout.seq_config(), serde_json::to_string_pretty(&cfg)?)
         .context("write sequencer config")

@@ -136,6 +136,8 @@ impl Store {
         }
     }
 
+    #[allow(dead_code)] // Pre-Phase-2 per-L2-block attestation
+                        // tracking; kept as a debugging aid.
     pub fn set_attested_txid(&self, height: u32, txid: &Txid) -> Result<()> {
         self.conn.execute(
             "UPDATE blocks SET attested_txid = ?1 WHERE height = ?2",
@@ -147,6 +149,8 @@ impl Store {
     /// Lowest L2 block height that should-have-but-doesn't-have an L1
     /// attestation. Genesis (height 0) is never attested by design (it
     /// is the chain root, not a chain link), so this skips height 0.
+    #[allow(dead_code)] // Pre-Phase-2: no longer used since
+                        // attestation is now per-L1-block, not per-L2-block.
     pub fn latest_unattested_height(&self) -> Result<Option<u32>> {
         Ok(self
             .conn
@@ -208,5 +212,18 @@ impl Store {
 
     pub fn set_anchor(&self, op: &OutPoint) -> Result<()> {
         self.kv_put("anchor", &format!("{}:{}", op.txid, op.vout))
+    }
+
+    /// The highest L1 height for which we've successfully posted an
+    /// L1 attestation. Used to drive "post one attestation per new
+    /// L1 block" semantics — when L1 advances past this value, the
+    /// producer posts a new attestation covering the current L2 head.
+    pub fn last_attested_l1_height(&self) -> Result<Option<u32>> {
+        Ok(self.kv_get("last_attested_l1_height")?
+            .and_then(|s| s.parse::<u32>().ok()))
+    }
+
+    pub fn set_last_attested_l1_height(&self, l1_height: u32) -> Result<()> {
+        self.kv_put("last_attested_l1_height", &l1_height.to_string())
     }
 }

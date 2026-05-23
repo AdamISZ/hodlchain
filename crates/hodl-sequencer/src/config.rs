@@ -20,8 +20,15 @@ pub struct SequencerConfig {
     /// SQLite database file.
     pub db_path: PathBuf,
     /// Poll interval for L1 tip changes, in milliseconds. Default 1000.
+    /// This is the cadence at which the producer checks bitcoind for
+    /// new L1 blocks and, on advance, posts an attestation.
     #[serde(default)]
     pub poll_ms: Option<u64>,
+    /// L2 block production interval, in milliseconds. The producer
+    /// builds one L2 block per interval, regardless of L1 cadence.
+    /// Default 30_000 (30 seconds).
+    #[serde(default)]
+    pub block_interval_ms: Option<u64>,
 }
 
 impl SequencerConfig {
@@ -38,6 +45,10 @@ impl SequencerConfig {
 
     pub fn poll_interval(&self) -> std::time::Duration {
         std::time::Duration::from_millis(self.poll_ms.unwrap_or(1000))
+    }
+
+    pub fn block_interval(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(self.block_interval_ms.unwrap_or(30_000))
     }
 
     pub fn bitcoincore_auth(&self) -> bitcoincore_rpc::Auth {
@@ -67,6 +78,7 @@ pub fn write_example(path: &Path) -> Result<()> {
         listen: "127.0.0.1:8080".parse().unwrap(),
         db_path: PathBuf::from("./hodl-sequencer.db"),
         poll_ms: None,
+        block_interval_ms: None,
     };
     fs::write(path, serde_json::to_vec_pretty(&example)?)?;
     Ok(())

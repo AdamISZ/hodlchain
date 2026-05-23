@@ -12,7 +12,7 @@
 
 use crate::hash::H256;
 use crate::state::LedgerState;
-use crate::tx::L2Tx;
+use crate::tx::{L2Address, L2Tx};
 use alloc::vec::Vec;
 use bitcoin::OutPoint;
 use serde::{Deserialize, Serialize};
@@ -23,7 +23,10 @@ use sha2::{Digest, Sha256};
 pub struct L2BlockHeader {
     pub height: u32,
     pub prev_hash: H256,
-    /// L1 block under which this L2 block is anchored.
+    /// L1 block under which this L2 block is anchored. With sub-L1
+    /// block cadence, this is "the L1 tip observed at production
+    /// time" — many L2 blocks can share the same `l1_height` while
+    /// L1 is between blocks.
     pub l1_block_hash: H256,
     pub l1_height: u32,
     pub txs_root: H256,
@@ -33,11 +36,23 @@ pub struct L2BlockHeader {
     /// L1 outpoint that roots the sequencer's attestation chain.
     /// Some only in the genesis header (height 0); None otherwise.
     /// Nodes pick this up at cold-start and walk the chain forward
-    /// from it: each subsequent L2 block's L1 attestation is the
-    /// unique tx that spends the previous anchor and outputs a new
-    /// anchor at vout=1 (with the attestation OP_RETURN at vout=0).
+    /// from it: each subsequent L1 attestation is the unique tx
+    /// that spends the previous anchor and outputs a new anchor at
+    /// vout=1 (with the attestation OP_RETURN at vout=0).
     #[cfg_attr(feature = "std", schema(value_type = Option<crate::schemas::OutPointWire>))]
     pub anchor_outpoint: Option<OutPoint>,
+    /// L2 identity of whoever produced this block. `None` while the
+    /// sequencer identity key isn't yet wired through genesis
+    /// (pre-Phase-3). The field is in the header *now* so a future
+    /// multi-sequencer / threshold-signing design — where each
+    /// block names the responsible party — doesn't require a hard
+    /// fork. Under threshold signing it would hold a single
+    /// aggregated L2 address.
+    #[cfg_attr(
+        feature = "std",
+        schema(value_type = Option<String>, example = "0000000000000000000000000000000000000000000000000000000000000001")
+    )]
+    pub producer: Option<L2Address>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -49,22 +64,23 @@ pub struct L2Block {
 
 impl L2BlockHeader {
     /// Canonical block-hash: domain-separated sha256 over a fixed
-    /// field-by-field byte layout. Replaces the v0 serde_json-based
-    /// hash so the encoding is explicit (auditable) and works in
-    /// no_std contexts (the state-transition zk-program builds the
-    /// same hash).
+    /// field-by-field byte layout. v3 — adds the `producer` field
+    /// tail; the v2 prefix stays identical so the change is
+    /// localised.
     ///
     /// Layout (all multi-byte values big-endian):
     /// ```text
-    /// "hodl-block-v2"
+    /// "hodl-block-v3"
     ///   || height(4)            || prev_hash(32)        || l1_block_hash(32)
     ///   || l1_height(4)         || txs_root(32)         || state_root(32)
     ///   || timestamp(8)         || has_anchor(1)
     ///   || if has_anchor: anchor_outpoint.txid(32) || anchor_outpoint.vout(4)
+    ///   || has_producer(1)
+    ///   || if has_producer: producer.serialize(32)
     /// ```
     pub fn block_hash(&self) -> H256 {
         let mut h = Sha256::new();
-        h.update(b"hodl-block-v2");
+        h.update(b"hodl-block-v3");
         h.update(self.height.to_be_bytes());
         h.update(self.prev_hash.0);
         h.update(self.l1_block_hash.0);
@@ -77,6 +93,15 @@ impl L2BlockHeader {
                 h.update([1u8]);
                 h.update(AsRef::<[u8]>::as_ref(&op.txid));
                 h.update(op.vout.to_be_bytes());
+            }
+            None => {
+                h.update([0u8]);
+            }
+        }
+        match &self.producer {
+            Some(p) => {
+                h.update([1u8]);
+                h.update(p.serialize());
             }
             None => {
                 h.update([0u8]);
@@ -105,26 +130,35 @@ impl L2Block {
 /// Genesis block: height 0, all-zero parents, empty body, sentinel L1 anchor.
 ///
 /// `state_root` comes from an empty `LedgerState` (which commits to the
-/// initial `r` and retarget-window counters in addition to accounts and
-/// nullifiers). `anchor_outpoint` is the chain root for L1 attestation
-/// transactions; subsequent L2 blocks have `anchor_outpoint = None`.
-/// Producer and follower must compute genesis the same way.
+/// initial `r`, retarget-window counters, and `sequencer_fee_address`).
+/// `anchor_outpoint` is the chain root for L1 attestation transactions;
+/// subsequent L2 blocks have `anchor_outpoint = None`. `producer` is
+/// the sequencer's L2 identity address — `None` until the sequencer
+/// identity key is wired through genesis in Phase 3.
+///
+/// `sequencer_fee_address` is also threaded in here so the genesis
+/// state_root commits to the chain's fee destination from block 0.
 pub fn genesis(
     l1_block_hash: H256,
     l1_height: u32,
     timestamp: u64,
     anchor_outpoint: OutPoint,
+    producer: Option<L2Address>,
+    sequencer_fee_address: Option<L2Address>,
 ) -> L2Block {
     let txs: Vec<L2Tx> = Vec::new();
+    let mut genesis_state = LedgerState::new();
+    genesis_state.sequencer_fee_address = sequencer_fee_address;
     let header = L2BlockHeader {
         height: 0,
         prev_hash: H256::ZERO,
         l1_block_hash,
         l1_height,
         txs_root: L2Block::compute_txs_root(&txs),
-        state_root: LedgerState::new().state_root(),
+        state_root: genesis_state.state_root(),
         timestamp,
         anchor_outpoint: Some(anchor_outpoint),
+        producer,
     };
     L2Block { header, txs }
 }

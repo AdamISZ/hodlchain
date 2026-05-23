@@ -30,6 +30,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use bitcoin::secp256k1::{Secp256k1, XOnlyPublicKey};
 use bitcoin::{OutPoint, ScriptBuf};
 use hodl_core::block::L2Block;
+use hodl_core::op_return::Attestation;
 use hodl_core::proof::{verify_mint_entry, L1Output, L1View, MintProofEnvelope};
 use hodl_core::smt::{self, LeafKind};
 use hodl_core::state::{nullifiers_hash_of, Account, LedgerState, StateComponents};
@@ -38,7 +39,7 @@ use hodl_core::witness::touched_addresses;
 use std::collections::{BTreeSet, HashMap};
 
 use crate::api::ApiClient;
-use crate::esplora::{walk_attestation_chain, ChainStep, EsploraClient};
+use crate::esplora::{walk_attestation_chain, EsploraClient};
 use crate::wallet::VerifiedHead;
 
 /// L1View backed by a pre-fetched map of outpoint → L1Output.
@@ -186,7 +187,15 @@ pub async fn bootstrap(
 }
 
 /// Walk forward from the head to the current L1 tip. Returns the
-/// number of blocks newly verified and the updated head.
+/// number of L2 blocks newly verified and the updated head.
+///
+/// Each L1 attestation now commits to a *batch* of L2 blocks (the
+/// L2 head at the time the attestation was posted). For each
+/// attestation step we walk every L2 block in the range from
+/// `head.l2_height + 1` to `step.attestation.height`, verifying
+/// each block's L2-side state transition. The final block in the
+/// range is additionally checked against the L1 attestation's
+/// `(l2_block_hash, state_root)`.
 pub async fn walk_forward(
     head: VerifiedHead,
     api: &ApiClient,
@@ -204,22 +213,48 @@ pub async fn walk_forward(
     let mut head = head;
     let mut count = 0;
     for step in &chain {
-        head = step_forward(head, step, tip, api, esplora, &secp).await?;
-        count += 1;
+        let target = step.attestation.height;
+        if target <= head.l2_height {
+            // This attestation refers to a head we've already
+            // verified (or earlier). Advance the anchor we watch
+            // from next time and continue.
+            head.anchor_outpoint = step.new_anchor;
+            continue;
+        }
+        let start = head.l2_height + 1;
+        for h in start..=target {
+            // Intermediate blocks get full L2-side verification but
+            // are not L1-pinned. Only the final block (h == target)
+            // is checked against the attestation's hash + root.
+            let end_att = if h == target { Some(&step.attestation) } else { None };
+            head = verify_one_l2_block(head, h, end_att, tip, api, esplora, &secp).await?;
+            count += 1;
+        }
+        // Advance the anchor outpoint to this attestation's spend.
+        head.anchor_outpoint = step.new_anchor;
+        head.l1_height = step.l1_height;
     }
     Ok((head, count))
 }
 
-async fn step_forward<C: bitcoin::secp256k1::Verification>(
+/// Verify one L2 block against the current verified head.
+///
+/// `end_attestation` is `Some` only for the final L2 block in an
+/// L1-attested range, and triggers two additional checks beyond
+/// the per-block L2-side verification: the computed block hash and
+/// the block's claimed state_root must match the L1 attestation.
+/// For intermediate blocks (where the wallet still trusts the L2
+/// chain to advance honestly to the eventual L1-attested head),
+/// only L2-side checks run.
+async fn verify_one_l2_block<C: bitcoin::secp256k1::Verification>(
     head: VerifiedHead,
-    step: &ChainStep,
+    height: u32,
+    end_attestation: Option<&Attestation>,
     l1_tip: u32,
     api: &ApiClient,
     esplora: &EsploraClient,
     secp: &Secp256k1<C>,
 ) -> Result<VerifiedHead> {
-    let height = step.attestation.height;
-
     let block = api
         .get_block(height)
         .await
@@ -229,27 +264,30 @@ async fn step_forward<C: bitcoin::secp256k1::Verification>(
         .await
         .with_context(|| format!("fetch witness at height {height}"))?;
 
-    // ---- 1. Structural cross-checks (attestation ↔ body ↔ witness) ----
+    // ---- 1. Structural cross-checks (body ↔ witness; attestation
+    //         only for the end-of-range block) ----
     if block.header.height != height {
         bail!(
-            "block.header.height {} != attestation height {height}",
+            "block.header.height {} != requested height {height}",
             block.header.height
         );
     }
     let computed_block_hash = block.hash();
-    if computed_block_hash != step.attestation.l2_block_hash {
-        bail!(
-            "block hash {} != attestation hash {}",
-            computed_block_hash,
-            step.attestation.l2_block_hash
-        );
-    }
-    if block.header.state_root != step.attestation.state_root {
-        bail!(
-            "block.header.state_root {} != attestation state_root {}",
-            block.header.state_root,
-            step.attestation.state_root
-        );
+    if let Some(att) = end_attestation {
+        if computed_block_hash != att.l2_block_hash {
+            bail!(
+                "end-of-range block hash {} != attestation hash {}",
+                computed_block_hash,
+                att.l2_block_hash
+            );
+        }
+        if block.header.state_root != att.state_root {
+            bail!(
+                "end-of-range block.header.state_root {} != attestation state_root {}",
+                block.header.state_root,
+                att.state_root
+            );
+        }
     }
     let computed_txs_root = L2Block::compute_txs_root(&block.txs);
     if computed_txs_root != block.header.txs_root {
@@ -394,8 +432,11 @@ async fn step_forward<C: bitcoin::secp256k1::Verification>(
         accounts_root: new_accounts_root,
         l2_height: height,
         block_hash: computed_block_hash,
-        l1_height: step.l1_height,
-        anchor_outpoint: step.new_anchor,
+        // L1 anchor / height are updated by walk_forward at the end
+        // of each attestation step (not per L2 block, since many
+        // L2 blocks share the same L1 view).
+        l1_height: block.header.l1_height,
+        anchor_outpoint: head.anchor_outpoint,
         own_address: head.own_address,
         own_leaf: observer_post.leaf,
         own_path: observer_post.siblings,

@@ -229,7 +229,8 @@ cat > "$DATA_DIR/seq/config.json" <<EOF
   "l1_genesis_height": $L1_GENESIS,
   "listen": "127.0.0.1:$SEQ_PORT",
   "db_path": "$DATA_DIR/seq/hodl-sequencer.db",
-  "poll_ms": 500
+  "poll_ms": 500,
+  "block_interval_ms": 1500
 }
 EOF
 

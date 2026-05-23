@@ -110,22 +110,67 @@ impl Follower {
             return Ok(());
         }
 
-        let block: L2Block = self.seq.get_block(att.height).await?;
-        validate_block(&block, &att)?;
+        // Each L1 attestation now commits to a *batch* of L2 blocks
+        // (the L2 head at the time the sequencer posted it). Walk
+        // every L2 block in `(head_height, att.height]`, verifying
+        // each in turn. Only the final block is checked against the
+        // L1 attestation's hash + state_root; intermediates get the
+        // standard L2-side checks.
+        let start = head_height + 1;
+        for h in start..=att.height {
+            let is_end = h == att.height;
+            self.apply_one_l2_block(h, if is_end { Some(&att) } else { None })
+                .await?;
+        }
 
-        // Snapshot the r that the producer would have used at the start
-        // of this block — it's the r in our current state, before we
-        // apply this block. The producer used the same value.
+        // Advance the anchor + record the chain link to L1 once,
+        // after the whole range is applied.
+        {
+            let store = self.store.lock().unwrap();
+            store.set_anchor(&adv.new_anchor)?;
+            store.record_anchor_spend(&adv.spent_anchor, &adv.txid, adv.l1_height)?;
+        }
+
+        tracing::info!(
+            l2_blocks_applied = att.height - head_height,
+            l1_height = adv.l1_height,
+            att_txid = %adv.txid,
+            "applied L2 block range; advanced chain anchor"
+        );
+        Ok(())
+    }
+
+    /// Apply one L2 block to the live state. If `end_attestation` is
+    /// `Some`, additionally check the block's hash + state_root match
+    /// the L1 attestation that commits to it. Intermediate blocks in
+    /// an L1-attested batch get the L2-side checks only.
+    async fn apply_one_l2_block(
+        &self,
+        height: u32,
+        end_attestation: Option<&Attestation>,
+    ) -> Result<()> {
+        let block: L2Block = self.seq.get_block(height).await?;
+        if block.header.height != height {
+            bail!(
+                "block.header.height {} disagrees with requested height {height}",
+                block.header.height
+            );
+        }
+        if let Some(att) = end_attestation {
+            validate_block(&block, att)?;
+        }
+
+        // Snapshot r at block start — the producer used the r in
+        // our current state before this block applied.
         let r_for_block = self.shared.state.lock().unwrap().current_r;
 
-        // Re-verify every mint witness against L1 before touching state.
-        // Each verify is a blocking gettxout call, so off the runtime thread.
+        // Re-verify every mint witness against L1 before touching
+        // state.
         for (i, tx) in block.txs.iter().enumerate() {
             if let L2Tx::Mint(entry) = tx {
                 let entry = entry.clone();
                 let l1 = self.l1.clone();
                 let r = r_for_block;
-                let height = block.header.height;
                 tokio::task::spawn_blocking(move || {
                     let secp = Secp256k1::verification_only();
                     verify_mint_entry(&entry, &secp, l1.as_ref(), r)
@@ -136,26 +181,20 @@ impl Follower {
             }
         }
 
-        // Replay txs against current state. Apply, then close the block
-        // — `end_of_block` runs the retarget at window boundaries. Keep
-        // a pristine pre-block snapshot for the witness; inclusion
-        // proofs must be taken at the prior state_root.
         let secp = Secp256k1::new();
         let prior_state: LedgerState = self.shared.state.lock().unwrap().clone();
         let mut next_state: LedgerState = prior_state.clone();
         for tx in &block.txs {
             next_state
                 .apply(&secp, tx)
-                .map_err(|e| anyhow!("tx in block {} invalid: {e}", block.header.height))?;
+                .map_err(|e| anyhow!("tx in block {height} invalid: {e}"))?;
         }
-        next_state.end_of_block(block.header.height, block.header.l1_height);
+        next_state.end_of_block(height, block.header.l1_height);
 
-        // Continuity + state-root sanity.
         let computed_state_root = next_state.state_root();
         if computed_state_root != block.header.state_root {
             bail!(
-                "state root mismatch at L2 height {}: computed {} != header {}",
-                block.header.height,
+                "state root mismatch at L2 height {height}: computed {} != header {}",
                 computed_state_root,
                 block.header.state_root
             );
@@ -163,25 +202,20 @@ impl Follower {
         let prev_hash = self.shared.head.lock().unwrap().block_hash;
         if block.header.prev_hash != prev_hash {
             bail!(
-                "prev_hash mismatch at L2 height {}: block.prev_hash={} != head={}",
-                block.header.height,
+                "prev_hash mismatch at L2 height {height}: block.prev_hash={} != head={}",
                 block.header.prev_hash,
                 prev_hash
             );
         }
 
-        // Commit. The chain anchor advances to the change output of the
-        // attestation tx we just followed.
         let block_hash = block.hash();
         let new_head = HeadInfo {
-            height: block.header.height,
+            height,
             block_hash,
             state_root: block.header.state_root,
-            l1_height: adv.l1_height,
+            l1_height: block.header.l1_height,
         };
-        // Build the witness from the pristine pre-block state before
-        // committing.
-        let witness = BlockWitness::build(&prior_state, &block.txs, block.header.height);
+        let witness = BlockWitness::build(&prior_state, &block.txs, height);
 
         {
             let mut state = self.shared.state.lock().unwrap();
@@ -194,23 +228,11 @@ impl Follower {
                 &*self.shared.state.lock().unwrap(),
                 &witness,
             )?;
-            store.set_anchor(&adv.new_anchor)?;
-            // Record the chain link for the Esplora-compatible /outspend
-            // endpoint that light clients walk.
-            store.record_anchor_spend(&adv.spent_anchor, &adv.txid, adv.l1_height)?;
         }
         {
             let mut head = self.shared.head.lock().unwrap();
             *head = new_head;
         }
-
-        tracing::info!(
-            l2_height = block.header.height,
-            l1_height = adv.l1_height,
-            txs = block.txs.len(),
-            att_txid = %adv.txid,
-            "applied L2 block; advanced chain anchor"
-        );
         Ok(())
     }
 }

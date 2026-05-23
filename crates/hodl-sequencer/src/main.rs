@@ -80,6 +80,7 @@ async fn run(config_path: &std::path::Path) -> Result<()> {
         store: store.clone(),
         l1: l1.clone(),
         poll_interval: cfg.poll_interval(),
+        block_interval: cfg.block_interval(),
     };
     tokio::spawn(producer.run());
 
@@ -139,7 +140,10 @@ async fn bootstrap(
         let anchor_0 = tokio::task::spawn_blocking(move || l1c.pick_initial_anchor()).await??;
         tracing::info!(anchor = %format_args!("{}:{}", anchor_0.txid, anchor_0.vout), "selected anchor_0");
 
-        let block = genesis(l1_block_hash, target, now, anchor_0);
+        // No sequencer identity or fee address yet (Phase 3 wires
+        // those through). Genesis records `None` for both; the
+        // chain commits to "fees burn, producer implicit".
+        let block = genesis(l1_block_hash, target, now, anchor_0, None, None);
         let state = LedgerState::new();
         // Genesis carries no txs; its witness is trivially empty.
         let witness = hodl_core::witness::BlockWitness::build(&state, &block.txs, 0);
