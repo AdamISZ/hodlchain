@@ -10,7 +10,8 @@
 //! for later; the on-chain commitment already exists.
 
 use crate::consensus::{
-    INITIAL_R, RETARGET_MAX_FACTOR, RETARGET_MINT_WINDOW_ATOMS, TARGET_ATOMS_PER_BLOCK,
+    FEE_BPS, INITIAL_R, MIN_FEE, RETARGET_MAX_FACTOR, RETARGET_MINT_WINDOW_ATOMS,
+    TARGET_ATOMS_PER_BLOCK,
 };
 use crate::hash::H256;
 use crate::smt;
@@ -54,6 +55,11 @@ pub struct LedgerState {
     /// — exposed via RPC for stats / UI panels only; light clients
     /// accumulate it independently during block walks.
     pub total_minted_atoms: u64,
+    /// L2 address that receives per-transfer protocol fees. `None`
+    /// means fees are burned (subtracted from sender but credited to
+    /// no one). Set at chain init from genesis; immutable thereafter.
+    /// Part of `StateComponents` so the state_root commits to it.
+    pub sequencer_fee_address: Option<L2Address>,
 }
 
 impl Default for LedgerState {
@@ -65,6 +71,7 @@ impl Default for LedgerState {
             current_window_atoms: 0,
             current_window_start_l1_height: None,
             total_minted_atoms: 0,
+            sequencer_fee_address: None,
         }
     }
 }
@@ -206,14 +213,33 @@ impl LedgerState {
         secp.verify_schnorr(&t.signature, &msg, &t.body.from)
             .map_err(|_| ApplyError::BadSignature)?;
 
+        // Compute the protocol fee. `fee = max(MIN_FEE, amount * FEE_BPS
+        // / 10_000)`. Sender pays `amount + fee`; recipient gets
+        // `amount`; the fee credits the sequencer fee address (or is
+        // burned if the chain was bootstrapped without one).
+        let fee = core::cmp::max(MIN_FEE, t.body.amount.saturating_mul(FEE_BPS) / 10_000);
+        let total = t.body.amount.saturating_add(fee);
+
         let from_balance = self.balance_of(&t.body.from);
-        if from_balance < t.body.amount { return Err(ApplyError::InsufficientBalance); }
+        if from_balance < total { return Err(ApplyError::InsufficientBalance); }
 
         let from = self.accounts.entry(t.body.from).or_default();
-        from.balance -= t.body.amount;
+        from.balance -= total;
         from.nonce += 1;
         let to = self.accounts.entry(t.body.to).or_default();
         to.balance = to.balance.saturating_add(t.body.amount);
+        if let Some(fee_addr) = self.sequencer_fee_address {
+            // Sender == fee recipient would have routed fee back to
+            // self — fine, the math is consistent (subtracted as part
+            // of `total`, added back to fee_addr). No special case
+            // needed.
+            let fee_acct = self.accounts.entry(fee_addr).or_default();
+            fee_acct.balance = fee_acct.balance.saturating_add(fee);
+        }
+        // If `sequencer_fee_address` is None, the fee atoms are
+        // burned (total supply decreases). This is the placeholder
+        // case used before the sequencer identity is wired through
+        // genesis in Phase 3.
         Ok(())
     }
 
@@ -251,6 +277,7 @@ impl LedgerState {
             current_r: self.current_r,
             current_window_atoms: self.current_window_atoms,
             current_window_start_l1_height: self.current_window_start_l1_height,
+            sequencer_fee_address: self.sequencer_fee_address,
         }
     }
 
@@ -291,15 +318,24 @@ pub struct StateComponents {
     /// window began. `None` during quiet periods (no mints in
     /// progress).
     pub current_window_start_l1_height: Option<u32>,
+    /// L2 address that receives per-transfer fees. `None` means
+    /// fees are burned. Set at chain init from genesis; immutable.
+    #[cfg_attr(
+        feature = "std",
+        schema(value_type = Option<String>, example = "0000000000000000000000000000000000000000000000000000000000000001")
+    )]
+    pub sequencer_fee_address: Option<L2Address>,
 }
 
 impl StateComponents {
-    /// Canonical state-root hash. v2 — the retarget tail encodes the
-    /// window-start L1 height as a tag + payload so the `None` case
-    /// has a distinct byte representation.
+    /// Canonical state-root hash. v3 — adds the sequencer fee
+    /// address tail so the chain commits to where fees flow. The
+    /// retarget tail keeps its v2 shape; the fee-address tail is
+    /// appended (tag byte for Some/None, then 32-byte serialised
+    /// x-only pubkey when Some).
     pub fn state_root(&self) -> H256 {
         let mut h = Sha256::new();
-        h.update(b"hodl-state-v2");
+        h.update(b"hodl-state-v3");
         h.update(&self.accounts_root.0);
         h.update(&self.nullifiers_hash.0);
         h.update(b"|retarget|");
@@ -309,6 +345,16 @@ impl StateComponents {
             Some(h1) => {
                 h.update([1u8]);
                 h.update(&h1.to_be_bytes());
+            }
+            None => {
+                h.update([0u8]);
+            }
+        }
+        h.update(b"|fee|");
+        match &self.sequencer_fee_address {
+            Some(addr) => {
+                h.update([1u8]);
+                h.update(addr.serialize());
             }
             None => {
                 h.update([0u8]);
@@ -517,14 +563,98 @@ mod tests {
         let dup = L2Tx::Mint(stub_entry("deadbeef", 1, bob, &alice_kp));
         assert!(matches!(state.apply(&secp, &dup), Err(ApplyError::DoubleMint)));
 
-        // Transfer 300 alice -> bob
+        // Transfer 300 alice -> bob. Fee is max(MIN_FEE=100,
+        // 300*1/10000=0) = 100 atoms. With sequencer_fee_address
+        // = None (the default in LedgerState::new()), fees are
+        // burned. So Alice pays 400, Bob receives 300, the
+        // remaining 100 vanishes.
         let body = TransferBody { from: alice, to: bob, amount: 300, nonce: 0 };
         let msg = Message::from_digest(body.sighash().0);
         let sig = secp.sign_schnorr(&msg, &alice_kp);
         let xfer = L2Tx::Transfer(SignedTransfer { body, signature: sig });
         state.apply(&secp, &xfer).unwrap();
-        assert_eq!(state.balance_of(&alice), 700);
+        assert_eq!(state.balance_of(&alice), 600);
         assert_eq!(state.balance_of(&bob), 300);
         assert_eq!(state.nonce_of(&alice), 1);
+    }
+
+    #[test]
+    fn transfer_credits_fee_to_sequencer_address() {
+        // With sequencer_fee_address = Some(seq), the fee is
+        // credited to seq's account rather than burned.
+        let secp = Secp256k1::new();
+        let alice_kp = Keypair::new(&secp, &mut bitcoin::secp256k1::rand::thread_rng());
+        let (alice, _) = alice_kp.x_only_public_key();
+        let bob_kp = Keypair::new(&secp, &mut bitcoin::secp256k1::rand::thread_rng());
+        let (bob, _) = bob_kp.x_only_public_key();
+        let seq_kp = Keypair::new(&secp, &mut bitcoin::secp256k1::rand::thread_rng());
+        let (seq, _) = seq_kp.x_only_public_key();
+
+        let mut state = LedgerState::new();
+        state.sequencer_fee_address = Some(seq);
+        state.apply(&secp, &L2Tx::Mint(stub_entry("aaaa", 1000, alice, &alice_kp)))
+            .unwrap();
+
+        let body = TransferBody { from: alice, to: bob, amount: 300, nonce: 0 };
+        let msg = Message::from_digest(body.sighash().0);
+        let sig = secp.sign_schnorr(&msg, &alice_kp);
+        state.apply(&secp, &L2Tx::Transfer(SignedTransfer { body, signature: sig })).unwrap();
+
+        assert_eq!(state.balance_of(&alice), 600);
+        assert_eq!(state.balance_of(&bob), 300);
+        assert_eq!(state.balance_of(&seq), 100); // MIN_FEE
+        // Total supply preserved (no burn).
+        assert_eq!(
+            state.balance_of(&alice) + state.balance_of(&bob) + state.balance_of(&seq),
+            1000,
+        );
+    }
+
+    #[test]
+    fn transfer_fee_scales_with_amount_above_min() {
+        // Amount large enough that 1 bp exceeds MIN_FEE.
+        // 2_000_000 atoms * 1 / 10_000 = 200 > MIN_FEE (100).
+        let secp = Secp256k1::new();
+        let alice_kp = Keypair::new(&secp, &mut bitcoin::secp256k1::rand::thread_rng());
+        let (alice, _) = alice_kp.x_only_public_key();
+        let bob_kp = Keypair::new(&secp, &mut bitcoin::secp256k1::rand::thread_rng());
+        let (bob, _) = bob_kp.x_only_public_key();
+        let seq_kp = Keypair::new(&secp, &mut bitcoin::secp256k1::rand::thread_rng());
+        let (seq, _) = seq_kp.x_only_public_key();
+
+        let mut state = LedgerState::new();
+        state.sequencer_fee_address = Some(seq);
+        state.apply(&secp, &L2Tx::Mint(stub_entry("bbbb", 5_000_000, alice, &alice_kp)))
+            .unwrap();
+
+        let body = TransferBody { from: alice, to: bob, amount: 2_000_000, nonce: 0 };
+        let msg = Message::from_digest(body.sighash().0);
+        let sig = secp.sign_schnorr(&msg, &alice_kp);
+        state.apply(&secp, &L2Tx::Transfer(SignedTransfer { body, signature: sig })).unwrap();
+
+        assert_eq!(state.balance_of(&seq), 200);
+        assert_eq!(state.balance_of(&alice), 5_000_000 - 2_000_000 - 200);
+    }
+
+    #[test]
+    fn transfer_rejected_when_balance_below_amount_plus_fee() {
+        // Alice has exactly `amount` worth of balance — insufficient
+        // because she also owes the fee.
+        let secp = Secp256k1::new();
+        let alice_kp = Keypair::new(&secp, &mut bitcoin::secp256k1::rand::thread_rng());
+        let (alice, _) = alice_kp.x_only_public_key();
+        let bob_kp = Keypair::new(&secp, &mut bitcoin::secp256k1::rand::thread_rng());
+        let (bob, _) = bob_kp.x_only_public_key();
+
+        let mut state = LedgerState::new();
+        state.apply(&secp, &L2Tx::Mint(stub_entry("cccc", 300, alice, &alice_kp)))
+            .unwrap();
+        let body = TransferBody { from: alice, to: bob, amount: 300, nonce: 0 };
+        let msg = Message::from_digest(body.sighash().0);
+        let sig = secp.sign_schnorr(&msg, &alice_kp);
+        assert!(matches!(
+            state.apply(&secp, &L2Tx::Transfer(SignedTransfer { body, signature: sig })),
+            Err(ApplyError::InsufficientBalance)
+        ));
     }
 }

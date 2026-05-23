@@ -117,6 +117,26 @@ pub const RETARGET_MAX_FACTOR: f64 = 2.0;
 /// L2 atoms; we use a 1:1 mapping for the POC so that f(V,T) <= V trivially.
 pub const ATOMS_PER_SAT: u64 = 1;
 
+/// Per-transfer protocol fee, in basis points (hundredths of a
+/// percent). Computed as `amount * FEE_BPS / 10_000`. Paid to the
+/// sequencer's L2 fee address.
+///
+/// **Demo / regtest value:** 1 bp = 0.01%. Anti-DoS-first, revenue-
+/// second — at this rate a transfer of 1M atoms costs 100 atoms in
+/// fee, enough to make spam economically meaningful but cheap for
+/// any real use case.
+///
+/// **Planned mainnet value:** TBD; same order of magnitude likely.
+pub const FEE_BPS: u64 = 1;
+
+/// Floor on the per-transfer protocol fee, in atoms. Ensures that
+/// even very small transfers pay a non-zero fee (preventing
+/// zero-fee spam at the low end where `amount * FEE_BPS / 10_000`
+/// rounds to zero).
+///
+/// `fee = max(MIN_FEE, amount * FEE_BPS / 10_000)`.
+pub const MIN_FEE: u64 = 100;
+
 /// Number of L1 confirmations required before a mint message is credited.
 pub const MINT_CONFIRMATIONS: u32 = 1;
 

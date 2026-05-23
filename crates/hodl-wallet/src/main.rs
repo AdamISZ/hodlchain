@@ -345,6 +345,9 @@ async fn cmd_transfer(wallet_path: &std::path::Path, args: TransferArgs) -> Resu
     .await?;
     if out.accepted {
         println!("transfer accepted");
+        println!("  amount: {} atoms", args.amount);
+        println!("  fee:    {} atoms", out.fee);
+        println!("  total:  {} atoms (deducted from sender)", out.total);
     } else {
         println!("rejected: {}", out.error.unwrap_or_default());
     }

@@ -181,6 +181,7 @@ pub async fn bootstrap(
         current_window_atoms: bal.state_components.current_window_atoms,
         current_window_start_l1_height: bal.state_components.current_window_start_l1_height,
         total_minted_atoms: bal.total_minted_atoms,
+        sequencer_fee_address: bal.state_components.sequencer_fee_address,
     })
 }
 
@@ -281,7 +282,7 @@ async fn step_forward<C: bitcoin::secp256k1::Verification>(
     }
     // Cross-check witness's touched set matches the block's. Catches a
     // node that under-reports (or over-reports) touched accounts.
-    let expected: Vec<L2Address> = touched_addresses(&block.txs);
+    let expected: Vec<L2Address> = touched_addresses(&block.txs, head.sequencer_fee_address);
     let mut got: Vec<L2Address> = witness.pre_proofs.iter().map(|p| p.address).collect();
     got.sort();
     if expected != got {
@@ -316,6 +317,7 @@ async fn step_forward<C: bitcoin::secp256k1::Verification>(
     sparse_ls.current_window_atoms = head.current_window_atoms;
     sparse_ls.current_window_start_l1_height = head.current_window_start_l1_height;
     sparse_ls.total_minted_atoms = head.total_minted_atoms;
+    sparse_ls.sequencer_fee_address = head.sequencer_fee_address;
 
     for (i, tx) in block.txs.iter().enumerate() {
         sparse_ls.apply(secp, tx).map_err(|e| {
@@ -360,6 +362,7 @@ async fn step_forward<C: bitcoin::secp256k1::Verification>(
         current_r: sparse_ls.current_r,
         current_window_atoms: sparse_ls.current_window_atoms,
         current_window_start_l1_height: sparse_ls.current_window_start_l1_height,
+        sequencer_fee_address: sparse_ls.sequencer_fee_address,
     };
     let new_state_root = new_components.state_root();
     if new_state_root != block.header.state_root {
@@ -401,6 +404,7 @@ async fn step_forward<C: bitcoin::secp256k1::Verification>(
         current_window_atoms: sparse_ls.current_window_atoms,
         current_window_start_l1_height: sparse_ls.current_window_start_l1_height,
         total_minted_atoms: sparse_ls.total_minted_atoms,
+        sequencer_fee_address: sparse_ls.sequencer_fee_address,
     })
 }
 

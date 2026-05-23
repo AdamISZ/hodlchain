@@ -317,6 +317,13 @@ pub struct VerifiedHead {
     /// state-root commitment — purely for stats display.
     #[serde(default)]
     pub total_minted_atoms: u64,
+    /// L2 address that receives per-transfer fees on this chain.
+    /// Immutable from genesis, so we just carry it forward across
+    /// sparse-walk steps and feed it back into `StateComponents`
+    /// when recomputing the post-block state_root. `None` means
+    /// fees are burned.
+    #[serde(default)]
+    pub sequencer_fee_address: Option<XOnlyPublicKey>,
 }
 
 #[cfg(test)]

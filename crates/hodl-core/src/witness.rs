@@ -53,8 +53,14 @@ pub struct BlockWitness {
 /// producer / follower to know which inclusion proofs to snapshot
 /// when building a witness, and by the wallet (independently) as a
 /// cross-check that the server didn't under-report.
-pub fn touched_addresses(txs: &[L2Tx]) -> Vec<L2Address> {
+///
+/// `fee_address` (if `Some`) is added to the set when any transfer
+/// is present, because transfers credit a fee to that address and
+/// therefore touch it. Mint blocks alone don't touch the fee
+/// account (mints don't pay fees).
+pub fn touched_addresses(txs: &[L2Tx], fee_address: Option<L2Address>) -> Vec<L2Address> {
     let mut set: BTreeSet<L2Address> = BTreeSet::new();
+    let mut has_transfer = false;
     for tx in txs {
         match tx {
             L2Tx::Mint(entry) => {
@@ -63,7 +69,13 @@ pub fn touched_addresses(txs: &[L2Tx]) -> Vec<L2Address> {
             L2Tx::Transfer(t) => {
                 set.insert(t.body.from);
                 set.insert(t.body.to);
+                has_transfer = true;
             }
+        }
+    }
+    if has_transfer {
+        if let Some(addr) = fee_address {
+            set.insert(addr);
         }
     }
     set.into_iter().collect()
@@ -74,7 +86,7 @@ impl BlockWitness {
     /// the block's final tx list.
     pub fn build(prior_state: &LedgerState, txs: &[L2Tx], height: u32) -> Self {
         let prior_accounts_root = prior_state.accounts_root();
-        let touched = touched_addresses(txs);
+        let touched = touched_addresses(txs, prior_state.sequencer_fee_address);
         let pre_proofs = touched
             .into_iter()
             .map(|addr| prior_state.account_inclusion_proof(addr))

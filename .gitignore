@@ -25,3 +25,8 @@ docs/*.synctex.gz
 docs/*.toc
 docs/*.pdf
 docs/*.tex
+
+# Maintainer-only notes — useful locally as a release runbook but
+# not appropriate for publication (refers to maintainer by name,
+# documents internal flow). Keep on disk, do not push.
+docs/release.md

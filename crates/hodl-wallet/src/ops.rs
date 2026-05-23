@@ -387,6 +387,21 @@ pub struct TransferInput {
 pub struct TransferOutput {
     pub accepted: bool,
     pub error: Option<String>,
+    /// Protocol fee the chain will deduct from the sender, in atoms.
+    /// Computed as `max(MIN_FEE, amount * FEE_BPS / 10_000)`. Surfaced
+    /// here so UIs can display "amount + fee = total" without
+    /// re-deriving the formula client-side.
+    pub fee: u64,
+    /// Convenience: `amount + fee`. The sender's balance decreases by
+    /// this much; the recipient receives `amount`.
+    pub total: u64,
+}
+
+/// Mirror of the on-chain formula. Kept in sync with
+/// `hodl_core::state::apply_transfer`.
+pub fn compute_transfer_fee(amount: u64) -> u64 {
+    use hodl_core::consensus::{FEE_BPS, MIN_FEE};
+    std::cmp::max(MIN_FEE, amount.saturating_mul(FEE_BPS) / 10_000)
 }
 
 pub async fn transfer(wallet_path: &Path, input: TransferInput) -> Result<TransferOutput> {
@@ -406,9 +421,12 @@ pub async fn transfer(wallet_path: &Path, input: TransferInput) -> Result<Transf
     let signature = secp.sign_schnorr(&msg, &kp);
     let signed = SignedTransfer { body, signature };
     let resp = api.submit_transfer(signed).await?;
+    let fee = compute_transfer_fee(input.amount);
     Ok(TransferOutput {
         accepted: resp.accepted,
         error: resp.error,
+        fee,
+        total: input.amount.saturating_add(fee),
     })
 }
 
