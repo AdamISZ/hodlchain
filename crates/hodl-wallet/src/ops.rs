@@ -417,12 +417,16 @@ pub async fn transfer(wallet_path: &Path, input: TransferInput) -> Result<Transf
     let kp = wf.l2_identity_keypair(&secp)?;
     let from = wf.l2_identity_xonly(&secp)?;
     let api = ApiClient::new(wf.sequencer_url.clone(), wf.node_url.clone());
-    let bal = api.balance(&from).await?;
+    // Use `effective_nonce` from the *sequencer* (not the node):
+    // it accounts for any of our own transfers still sitting in
+    // mempool, so back-to-back submits don't conflict on a stale
+    // on-chain nonce.
+    let bal = api.balance_via_sequencer(&from).await?;
     let body = TransferBody {
         from,
         to: input.to,
         amount: input.amount,
-        nonce: bal.nonce,
+        nonce: bal.effective_nonce,
     };
     let msg = Message::from_digest(body.sighash().0);
     let signature = secp.sign_schnorr(&msg, &kp);

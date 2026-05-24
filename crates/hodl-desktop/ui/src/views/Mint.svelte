@@ -31,11 +31,39 @@
   let funding = $state<CheckMintFundingOutput | null>(null);
   let msg = $state<MintMessageOutput | null>(null);
 
+  // Soft → L1-confirmed tracking for an accepted mint, mirroring
+  // Transfer.svelte. The mint message goes into mempool → next L2
+  // block credits the destination → L1 attestation lands → we flip
+  // the pill.
+  let confStage = $state<"soft" | "hard">("soft");
+  let confirmedAtUnix = $state<number | null>(null);
+  let confTimer: ReturnType<typeof setInterval> | null = null;
+  const CONF_POLL_INTERVAL_MS = 5_000;
+
   let pollTimer: ReturnType<typeof setInterval> | null = null;
 
   onDestroy(() => {
     if (pollTimer !== null) clearInterval(pollTimer);
+    if (confTimer !== null) clearInterval(confTimer);
   });
+
+  async function pollForHardConf() {
+    if (msg === null || !msg.soft_conf) return;
+    try {
+      const head = await api.lightBalance({ addr: null });
+      if (head.l2_height >= msg.soft_conf.target_l2_height) {
+        confStage = "hard";
+        confirmedAtUnix = Math.floor(Date.now() / 1000);
+        if (confTimer !== null) { clearInterval(confTimer); confTimer = null; }
+      }
+    } catch (e) {
+      console.warn("hard-conf poll failed:", e);
+    }
+  }
+
+  function fmtUnix(ts: number): string {
+    return new Date(ts * 1000).toLocaleString();
+  }
 
   async function deriveAddress() {
     err = null;
@@ -85,6 +113,17 @@
     try {
       msg = await api.mintMessage({ bip32_index: utxo.bip32_index, to: null });
       stage = "done";
+      // Start tracking soft → L1-confirmed if the sequencer
+      // returned a receipt.
+      confStage = "soft";
+      confirmedAtUnix = null;
+      if (msg.accepted && msg.soft_conf) {
+        // Fire one immediately (in case enough L1 blocks have
+        // already elapsed) plus a timer for follow-ups. The poll
+        // clears its own timer once it flips to hard.
+        void pollForHardConf();
+        confTimer = setInterval(() => void pollForHardConf(), CONF_POLL_INTERVAL_MS);
+      }
     } catch (e) {
       err = String(e);
     } finally {
@@ -183,13 +222,46 @@
     <div class="card stack">
       {#if msg.accepted}
         <p>
-          <span class="success">✓ accepted.</span>
-          <strong>{msg.mint_amount ?? "?"}</strong> L2 atoms credited.
+          <span class="success">✓ accepted</span>
+          {#if confStage === "soft"}
+            <span class="tag soft">soft</span>
+          {:else}
+            <span class="tag hard">L1-confirmed</span>
+          {/if}
+        </p>
+        <p>
+          <strong>{msg.mint_amount ?? "?"}</strong> L2 atoms
+          {#if confStage === "hard"}
+            credited.
+          {:else}
+            will be credited.
+          {/if}
         </p>
         <dl>
           <dt>nullifier</dt>
           <dd class="mono small">{msg.nullifier_hex}</dd>
+          {#if msg.soft_conf}
+            <dt>target L2 height</dt>
+            <dd>{msg.soft_conf.target_l2_height}</dd>
+            {#if confirmedAtUnix !== null}
+              <dt>L1-confirmed at</dt>
+              <dd class="small">{fmtUnix(confirmedAtUnix)}</dd>
+            {/if}
+          {/if}
         </dl>
+        {#if confStage === "soft"}
+          <p class="muted small">
+            Sequencer has soft-confirmed your mint. Watching the L1
+            attestation chain for L2 height
+            {msg.soft_conf?.target_l2_height}; the pill above will
+            flip to "L1-confirmed" automatically.
+          </p>
+        {:else}
+          <p class="muted small">
+            L2 block {msg.soft_conf?.target_l2_height} is
+            L1-attested. The mint is final.
+          </p>
+        {/if}
       {:else}
         <p>
           <span class="error">rejected:</span>

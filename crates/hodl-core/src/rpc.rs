@@ -162,7 +162,18 @@ pub struct BalanceResponse {
     )]
     pub address: L2Address,
     pub balance: Amount,
+    /// On-chain nonce — what the account currently has under
+    /// `state_root`. Use this for light-client verification.
     pub nonce: u64,
+    /// Nonce a sender should use for the *next* new transfer. On
+    /// the sequencer this is `state.nonce + count_of_mempool_
+    /// transfers_from(addr)` — i.e. it accounts for in-flight
+    /// transfers that haven't yet been applied to state. On the
+    /// node this equals `nonce` (the node has no mempool view).
+    /// Wallets submitting transfers should read this field; light
+    /// clients verifying balance should ignore it.
+    #[serde(default)]
+    pub effective_nonce: u64,
     /// L2 height of the state these values are drawn from.
     pub l2_height: u32,
     /// The state_root computed at that L2 height. Redundant given

@@ -139,3 +139,27 @@ label {
   border-radius: var(--radius);
   padding: var(--space-5);
 }
+
+/* Soft / hard confirmation pill, used after submitting a mint or
+   transfer. Soft = sequencer-acked but not yet L1-final. Hard =
+   L1-attested (we don't render this state today; the wallet
+   surfaces "L1-confirmed" by refreshing the dashboard balance). */
+.tag {
+  display: inline-block;
+  padding: 0.1rem 0.5rem;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  border: 1px solid currentColor;
+  text-transform: uppercase;
+  margin-left: var(--space-2);
+}
+.tag.soft {
+  color: var(--color-warning);
+  background: #fffbeb;
+}
+.tag.hard {
+  color: var(--color-success);
+  background: #f0fdf4;
+}

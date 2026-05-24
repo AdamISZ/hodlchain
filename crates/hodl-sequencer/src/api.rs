@@ -308,6 +308,18 @@ async fn get_balance(
     let components = state.components();
     let state_root = components.state_root();
     let total_minted_atoms = state.total_minted_atoms;
+    drop(state);
+    // Mempool-adjusted nonce: count pending transfers from this
+    // sender so a wallet submitting back-to-back gets a fresh nonce
+    // even if the prior transfer hasn't been applied yet.
+    let pending_from_addr = {
+        let mp = app.shared.mempool.lock().unwrap();
+        mp.transfers
+            .iter()
+            .filter(|t| t.body.from == addr)
+            .count() as u64
+    };
+    let effective_nonce = nonce.saturating_add(pending_from_addr);
     Ok(Json(BalanceResponse {
         address: addr,
         balance,
@@ -317,6 +329,7 @@ async fn get_balance(
         state_components: components,
         proof,
         total_minted_atoms,
+        effective_nonce,
     }))
 }
 

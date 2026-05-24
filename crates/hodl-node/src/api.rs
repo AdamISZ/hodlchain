@@ -160,6 +160,9 @@ async fn get_balance(
         state_components: components,
         proof,
         total_minted_atoms,
+        // The node has no mempool of its own — it sees only
+        // L1-attested state. effective_nonce == on-chain nonce.
+        effective_nonce: nonce,
     }))
 }
 

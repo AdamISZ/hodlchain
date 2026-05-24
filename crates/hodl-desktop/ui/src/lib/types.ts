@@ -87,6 +87,8 @@ export interface MintMessageOutput {
   mint_amount?: number | null;
   nullifier_hex?: string | null;
   error?: string | null;
+  /** Sequencer-signed soft-confirmation receipt. Present on accept. */
+  soft_conf?: SoftConf | null;
 }
 
 // ---------- transfer + balance ----------
@@ -99,6 +101,24 @@ export interface TransferInput {
 export interface TransferOutput {
   accepted: boolean;
   error?: string | null;
+  /** Protocol fee deducted (`max(MIN_FEE, amount * FEE_BPS / 10_000)`). */
+  fee: number;
+  /** `amount + fee` — what's deducted from the sender's balance. */
+  total: number;
+  /** Sequencer-signed soft-confirmation receipt. Present on accept. */
+  soft_conf?: SoftConf | null;
+}
+
+/**
+ * Sequencer-signed promise that an accepted tx will land in L2
+ * block `target_l2_height`. Mirror of hodl_core::rpc::SoftConf.
+ */
+export interface SoftConf {
+  tx_hash: string;
+  target_l2_height: number;
+  accepted_at_unix: number;
+  /** 64-byte hex Schnorr sig over the canonical sighash. */
+  sequencer_sig: string;
 }
 
 export interface BalanceInput {

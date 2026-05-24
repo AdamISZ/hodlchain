@@ -37,3 +37,18 @@ export const RETARGET_MINT_WINDOW_ATOMS = 100_000_000;
  * Demo / regtest value. Planned mainnet value: 50_000_000.
  */
 export const TARGET_ATOMS_PER_BLOCK = 1_000_000;
+
+/** Per-transfer protocol fee in basis points. */
+export const FEE_BPS = 1;
+/** Minimum per-transfer fee in atoms (floor when 1 bp rounds to zero). */
+export const MIN_FEE = 100;
+
+/**
+ * Predict the fee the chain will deduct from a transfer of `amount`
+ * atoms. Mirror of hodl_core::state::apply_transfer's formula; UIs
+ * use this to show "amount + fee = total" before submit so users
+ * don't get surprised by the post-submit deduction.
+ */
+export function transferFee(amount: number): number {
+  return Math.max(MIN_FEE, Math.floor((amount * FEE_BPS) / 10_000));
+}

@@ -96,6 +96,26 @@ impl ApiClient {
         Ok(resp.json().await?)
     }
 
+    /// Like `balance()` but ALWAYS goes to the sequencer, regardless
+    /// of whether a node URL is configured. Used by transfer-building
+    /// code that needs a mempool-aware nonce: only the sequencer
+    /// reports `effective_nonce = state.nonce + in_flight_count`.
+    /// The node has no mempool of its own.
+    pub async fn balance_via_sequencer(&self, addr: &L2Address) -> Result<BalanceResponse> {
+        let url = format!(
+            "{}/balance/{}",
+            self.sequencer_url.trim_end_matches('/'),
+            hex::encode(addr.serialize())
+        );
+        let resp = self.http.get(&url).send().await
+            .with_context(|| format!("GET {url}"))?;
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(anyhow!("{url} returned HTTP {status}"));
+        }
+        Ok(resp.json().await?)
+    }
+
     /// Block-witness lookup. Prefers the node.
     pub async fn get_witness(&self, height: u32) -> Result<BlockWitness> {
         let base = self.node_url.as_deref().unwrap_or(&self.sequencer_url);
