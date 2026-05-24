@@ -14,12 +14,29 @@ Out of scope for v0:
 
 - Multi-sequencer consensus, fault proofs, decentralised sequencing.
 - Pegs (BTC does not move into/out of the L2).
-- Fees on L2 (no fee market).
+- Fee market or sender-specified fees on L2. A flat percentage
+  protocol fee paid to the sequencer's L2 address is implemented;
+  see "Fees" below.
 - Anonymity (deferred; the mint code is structured so a future ring-proof or ZK-proof variant of `MintProofEnvelope` can plug in without changing block format — see "Mint witness pluggability" below).
 
 In scope (now implemented):
 
 - Bitcoin-style retargeting of `r` (see "Retargeting" below). `r` is consensus state.
+- **Sub-L1 L2 block cadence** (30s by default), decoupled from L1.
+  Each L1 attestation now commits to a *batch* of L2 blocks. See
+  "L2 block structure" + "L1 attestation chain".
+- **Per-transfer protocol fee** (1 basis point by default,
+  100-atom floor). Credited to a sequencer L2 address committed
+  in genesis. See "Fees".
+- **Sequencer L2 identity key** + **signed soft-confirmation
+  receipts**. The sequencer publishes a Schnorr pubkey in the L2
+  genesis header (as both `producer` and `sequencer_fee_address`)
+  and signs an inclusion receipt for every accepted submission.
+  See "Sequencer identity and soft confirmations".
+- **L1 reorg recovery for the attestation chain.** The sequencer
+  tracks every posted attestation until 2 L1 confirmations and
+  reverts the chain anchor if the tx is evicted. L2 state never
+  reorgs. See "L1 reorg recovery".
 
 ## Stack
 
@@ -187,50 +204,164 @@ A user who submitted a mint at a different `r` (e.g., a window straddled their s
 
 ## L2 block structure
 
-One L2 block per L1 block. Cadence is locked by the sequencer posting one OP_RETURN per L1 block.
+L2 blocks are produced on the sequencer's own timer (default 30s,
+configurable per chain). L1 attestation runs on its own cadence —
+one attestation per L1 block, each committing to the *latest* L2
+head. So many L2 blocks share the same `l1_height` while Bitcoin
+is between blocks, and each L1 attestation effectively batches a
+range of L2 blocks. This decouples L2 throughput / latency from
+L1, while keeping L1 as the trust root.
 
 ```text
 L2BlockHeader {
-    height:        u32,
-    prev_hash:     H256,
-    l1_block_hash: H256,
-    l1_height:     u32,
-    txs_root:      H256,
-    state_root:    H256,
-    timestamp:     u64,
+    height:                 u32,
+    prev_hash:              H256,
+    l1_block_hash:          H256,
+    l1_height:              u32,                  // L1 tip observed at production time
+    txs_root:               H256,
+    state_root:             H256,
+    timestamp:              u64,
+    anchor_outpoint:        Option<OutPoint>,     // Some only in the genesis header
+    producer:               Option<L2Address>,    // sequencer L2 identity; None pre-Phase-3
+    sequencer_fee_address:  Option<L2Address>,    // Some only in the genesis header
 }
 L2Block { header, txs: Vec<L2Tx> }
 ```
+
+The block hash is `sha256("hodl-block-v3" || canonical(header))`;
+the canonical encoding hashes each field in order with a 1-byte
+discriminator for the three Option fields. `producer` is set on
+every non-genesis block to the sequencer's L2 identity pubkey;
+`sequencer_fee_address` is set only at genesis (chain-wide,
+immutable). Both fields are committed to the block hash, so a
+future multi-sequencer / threshold-signing design that names a
+different responsible party per block doesn't need a hard fork.
 
 `L2Tx` is either:
 
 - `Mint(MintEntry { event, witness })` — both the declared outcome (amount, nullifier, destination, lock parameters, L1 value) AND the proof. Nodes re-run `verify_mint_entry(entry, &secp, &l1, r)` for every mint in every block; a mismatch between what the witness authorises and what the event declares fails block validation. Block validity is therefore independent of trusting the sequencer.
 - `Transfer(SignedTransfer)` — `(from, to, amount, nonce, schnorr_sig)`. Sighash: `sha256("hodl-transfer-v0" || json(body))`.
 
-State is a pair of maps: `accounts: BTreeMap<L2Address, Account>` and `consumed_nullifiers: BTreeSet<String>`, plus the retarget scalars `current_r`, `current_window_atoms`, `current_window_start_l1_height` (the last being `Option<u32>` — `None` during quiet periods). The `state_root` is
+State is a pair of maps: `accounts: BTreeMap<L2Address, Account>`
+and `consumed_nullifiers: BTreeSet<String>`, plus the retarget
+scalars `current_r`, `current_window_atoms`,
+`current_window_start_l1_height` (the last being `Option<u32>` —
+`None` during quiet periods), the chain-wide
+`sequencer_fee_address: Option<L2Address>` (`None` means fees are
+burned), and a non-committed `total_minted_atoms` counter (exposed
+for stats, not in the state root). The `state_root` is
 
 ```text
 sha256(
-  "hodl-state-v2" ||
+  "hodl-state-v3" ||
   accounts_root  ||             // 256-level sparse Merkle tree
   nullifiers_hash ||
   "|retarget|" ||
   current_r_le_bytes(8) ||
   current_window_atoms_be(8) ||
   window_start_tag(1) ||        // 0x00 = None, 0x01 = Some(h)
-  [window_start_l1_height_be(4)]  // only present when tag = 0x01
+  [window_start_l1_height_be(4)] ||  // only present when tag = 0x01
+  "|fee|" ||
+  fee_addr_tag(1) ||             // 0x00 = None, 0x01 = Some(addr)
+  [fee_addr_xonly(32)]           // only present when tag = 0x01
 )
 ```
 
 where `accounts_root` is a sparse Merkle tree over the accounts map, keyed by the 32-byte x-only L2 address. Each populated leaf hashes `(addr, balance_be, nonce_be)` under tag `"hodl-smt-leaf-v0"`; unpopulated subtrees use a precomputed default-hash cache. This structure supports `O(log N)` inclusion proofs (and `O(log N)` non-inclusion proofs for addresses that don't exist), which is what enables the light-client model in the next section. `nullifiers_hash` is just a flat sorted-list hash — users don't query the nullifier set, and intra-L2 anti-reuse is enforced at apply time.
 
+## Fees
+
+A flat percentage protocol fee is deducted from every transfer:
+
+```text
+fee   = max(MIN_FEE, amount * FEE_BPS / 10_000)
+total = amount + fee
+```
+
+Defaults: `FEE_BPS = 1` (1 basis point = 0.01%), `MIN_FEE = 100`
+atoms. The sender's balance decreases by `total`; the recipient
+receives `amount`; `fee` credits the L2 account named in genesis
+as `sequencer_fee_address`. If that address is `None` (the
+default pre-Phase-3 placeholder), the fee atoms are burned —
+total supply decreases.
+
+Mints don't pay fees. The lock + L1 broadcast already costs the
+user real BTC fees, and mint volume is low; adding L2-side fees
+on entry buys nothing.
+
+Anti-DoS rationale: with zero fees, an attacker can loop transfers
+between two accounts they own at no marginal cost. The bottleneck
+under attack is signature verification (~50 μs each on a laptop)
+× block-build state mutation. Even a sub-cent fee bound makes the
+attack economically meaningful while staying invisible for real
+users.
+
+The fee parameters are demo-tuned to keep the regtest experience
+sensible; mainnet values will be re-derived alongside the rest of
+the consensus constants.
+
+## Sequencer identity and soft confirmations
+
+On first chain init the sequencer generates a BIP340 Schnorr
+keypair and persists the secret in its store. The public key is
+embedded in the L2 genesis block header as both `producer` (the
+identity of who built the block — also stamped into every
+subsequent non-genesis header) and `sequencer_fee_address` (the
+recipient of all per-transfer fees). The chain commits to both
+via the genesis state_root, so a follower starting cold from
+L1 can derive the canonical pubkey without an out-of-band
+config delivery.
+
+On every accepted `POST /mint` and `POST /transfer`, the
+sequencer returns a `SoftConf` receipt:
+
+```rust
+struct SoftConf {
+    tx_hash:           H256,
+    target_l2_height:  u32,       // current head + 1 at acceptance
+    accepted_at_unix:  u64,
+    sequencer_sig:     schnorr::Signature,
+}
+```
+
+The signature is BIP340 Schnorr over the canonical sighash
+`sha256("hodl-softconf-v1" || tx_hash || target_l2_height_be ||
+accepted_at_unix_be)`, made with the sequencer's identity key.
+
+Trust posture today: the receipt is informational. The sequencer
+*can* later drop the tx at block-build (insufficient balance after
+a parallel transfer, etc.) or include it at a later height. What
+the receipt *does* give us is a cryptographic basis for
+equivocation detection — if a sequencer ever signs two
+conflicting receipts (same `tx_hash` → different
+`target_l2_height`s, or includes the tx past the committed
+height) anyone holding both can prove misbehaviour against the
+known pubkey. Slashing on top of this is future work; the
+primitives are in place.
+
+In the UI: the wallet shows `[SOFT]` on every accepted submission,
+poll-watches the verified head, and flips to `[L1-CONFIRMED]` once
+`verified_head.l2_height >= soft_conf.target_l2_height`.
+
 ## L1 attestation chain
 
-Each L2 block is committed on L1 by a transaction whose vout=0 is the
-73-byte attestation OP_RETURN and whose vout=1 is a change output that
-becomes the next chain anchor. Attestations form an explicit on-chain
-linked list rooted at `anchor_0`, which the sequencer creates at
-cold-start and embeds in the L2 genesis block header.
+L2 blocks are committed on L1 via OP_RETURN attestation
+transactions. Each attestation tx's vout=0 carries the 73-byte
+payload below and vout=1 is a change output that becomes the next
+chain anchor. Attestations form an explicit on-chain linked list
+rooted at `anchor_0`, which the sequencer creates at cold-start and
+embeds in the L2 genesis block header.
+
+Under the sub-L1 cadence (Phase 2 onward), each L1 attestation
+commits to the **latest** L2 head at posting time — not the
+unique L2 block "for this L1 block". A single attestation
+therefore batches every L2 block produced since the previous
+attestation. Followers walk the L1 attestation chain as before,
+but for each chain step they now iterate every L2 block in the
+range `(prev_attested_height, current_attested_height]`,
+verifying state-transition continuity on the way and pinning only
+the final block of the range against the L1 attestation's
+`(l2_block_hash, state_root)` pair.
 
 ### Attestation payload (73 bytes, vout=0)
 
@@ -288,11 +419,39 @@ once. The sequencer therefore cannot publish two competing attestations
 at the same L2 height; whichever spend bitcoind mines wins, and the
 other is invalidated by the L1 mempool / consensus.
 
+### L1 reorg recovery
+
+The sequencer tracks every posted attestation tx in
+`pending_attestations` (a JSON blob in its kv store) until the tx
+reaches `REORG_FINALITY_DEPTH = 2` L1 confirmations. Each pending
+entry records `(txid, spent_anchor, new_anchor, l2_head_height,
+posted_at_l1_height)`. On every L1 poll the sequencer asks
+bitcoind for each tx's status:
+
+- **Confirmed at ≥ 2 confs** → drop from pending. The post is
+  past reorg risk and the new anchor is canonical.
+- **Mempool** (0 confs) → keep tracking. bitcoind will mine it
+  on the next block.
+- **Reorged** (negative confs — tx was once mined, now back in
+  mempool) → keep tracking. bitcoind will re-mine it in the new
+  canonical chain. Logged but no recovery needed.
+- **Missing** (not in chain, not in mempool — extreme case
+  where the anchor was double-spent or evicted) → revert the
+  chain anchor to `spent_anchor` and rewind
+  `last_attested_l1_height` by 1, so the next L1 tick posts a
+  fresh attestation chained from the original anchor.
+
+L2 chain state never reorgs. The sequencer's persisted
+`LedgerState` is treated as canonical across L1 reorgs;
+re-attestation just re-publishes the same L2 head under a new L1
+parent.
+
 ### Failure modes (v0)
 
-- **L1 reorg of the chain anchor**: every attestation downstream goes
-  with it. Same blast radius as the existing "1-confirmation" stance;
-  not a new exposure.
+- **L1 reorg of the chain anchor**: covered by the recovery path
+  above. Survivable when the tx stays in bitcoind's mempool;
+  recovered structurally when the anchor input is evicted. Bitcoin
+  reorgs of depth ≥ 2 are historically single-digit per year.
 - **RBF / fee-bumping the attestation tx**: would temporarily fork the
   chain in mempool until one wins. The sequencer does not RBF in v0.
 - **Dust**: the anchor UTXO shrinks by `fee` per attestation. With a

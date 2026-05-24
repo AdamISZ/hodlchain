@@ -111,7 +111,16 @@
     <div class="card balance">
       <div class="muted">balance</div>
       <div class="big mono">{fmtAtoms(soft.balance)}</div>
-      <div class="muted small">atoms <span class="tag soft" title="Sequencer-acknowledged; not yet L1-final">soft</span></div>
+      <div class="muted small">
+        atoms
+        {#if pendingL1 > 0}
+          <span
+            class="tag soft"
+            title="Sequencer-acknowledged; L1 attestation pending"
+            >soft</span
+          >
+        {/if}
+      </div>
       {#if verified !== null}
         <div class="hard-line small">
           {#if pendingL1 > 0}
@@ -122,7 +131,7 @@
             </span>
           {:else}
             <span class="success">✓</span>
-            <span class="muted">all L1-confirmed</span>
+            <span class="muted">L1-confirmed</span>
           {/if}
         </div>
       {/if}

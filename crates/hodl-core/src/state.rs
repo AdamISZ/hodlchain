@@ -514,6 +514,129 @@ mod tests {
         assert!((state.current_r - r0 / RETARGET_MAX_FACTOR).abs() < 1e-12);
     }
 
+    // --- Multi-L2-blocks-per-L1-height fixtures (Phase 2 cadence) ---
+    //
+    // Under the 30s producer cadence (one L2 block per timer tick,
+    // not per L1 block), many L2 blocks can share the same
+    // `l1_height` while Bitcoin is between blocks. These tests pin
+    // down the Δ=0 deferral and the eventual retarget firing once
+    // L1 actually advances.
+
+    #[test]
+    fn retarget_defers_across_many_l2_blocks_at_same_l1_height() {
+        // Window opens at L1=200 with the first L2 block (heap of
+        // pre-existing atoms above threshold). Then *eight* more
+        // L2 blocks land at the same L1 height (sequencer's 30s
+        // timer firing while Bitcoin hasn't produced a block).
+        // Each `end_of_block` call sees Δ_actual = 0 and defers.
+        let mut state = LedgerState::new();
+        state.current_window_atoms = RETARGET_MINT_WINDOW_ATOMS * 2;
+        let r0 = state.current_r;
+
+        // L2 block 1 at L1=200: window-start gets set, defers.
+        state.end_of_block(1, 200);
+        assert_eq!(state.current_window_start_l1_height, Some(200));
+        assert_eq!(state.current_r, r0);
+
+        // L2 blocks 2..=9 at the same L1 height: still defers,
+        // window-start unchanged, r unchanged, atoms unchanged.
+        for h in 2..=9 {
+            state.end_of_block(h, 200);
+            assert_eq!(
+                state.current_window_start_l1_height,
+                Some(200),
+                "window_start drifted at L2 height {h}"
+            );
+            assert_eq!(state.current_r, r0, "r changed at L2 height {h}");
+            assert_eq!(
+                state.current_window_atoms,
+                RETARGET_MINT_WINDOW_ATOMS * 2,
+                "atoms drifted at L2 height {h}"
+            );
+        }
+
+        // L1 finally advances to 201. The very next L2 block fires
+        // the retarget with Δ_actual = 1 (one L1 block).
+        state.end_of_block(10, 201);
+        assert!(
+            state.current_r != r0,
+            "expected retarget to fire once Δ_actual ≥ 1"
+        );
+        assert_eq!(state.current_window_atoms, 0);
+        assert_eq!(state.current_window_start_l1_height, None);
+    }
+
+    #[test]
+    fn retarget_window_start_set_by_first_mint_l1_view_not_l2_height() {
+        // Sequence of empty L2 blocks (no mints) at L1=300 should
+        // leave window_start = None. Then a hypothetical "first
+        // mint" pushes window_atoms above zero in L2 block 5 at
+        // L1=300; that's the L1 view that anchors the window.
+        let mut state = LedgerState::new();
+        let r0 = state.current_r;
+
+        // 4 empty blocks at L1=300, all no-ops.
+        for h in 1..=4 {
+            state.end_of_block(h, 300);
+        }
+        assert_eq!(state.current_window_start_l1_height, None);
+        assert_eq!(state.current_window_atoms, 0);
+
+        // First mint lands in L2 block 5 at L1=300 (below threshold
+        // so we don't trigger retarget yet).
+        state.current_window_atoms = RETARGET_MINT_WINDOW_ATOMS / 10;
+        state.end_of_block(5, 300);
+        assert_eq!(
+            state.current_window_start_l1_height,
+            Some(300),
+            "window-start should anchor to the L1 view at the L2 \
+             block where the first mint landed"
+        );
+        assert_eq!(state.current_r, r0);
+    }
+
+    #[test]
+    fn retarget_delta_measures_l1_span_not_l2_block_count() {
+        // Window opens at L1=400 in L2 block 1; mints accumulate to
+        // threshold across many L2 blocks at L1=400, then L1
+        // advances to 401, then 402, with more L2 blocks at each
+        // step. The retarget should fire with Δ_actual = 2 (L1
+        // span from window_start), regardless of how many L2
+        // blocks happened in between.
+        let mut state = LedgerState::new();
+        let r0 = state.current_r;
+
+        // Bring atoms up just below threshold; open window.
+        state.current_window_atoms = RETARGET_MINT_WINDOW_ATOMS / 2;
+        state.end_of_block(1, 400); // sets window_start=400, defers
+        assert_eq!(state.current_window_start_l1_height, Some(400));
+
+        // More L2 blocks at L1=400, then 401 (no extra mints, no
+        // change in atoms; just verifying calls are no-ops).
+        for h in 2..=5 {
+            state.end_of_block(h, 400);
+        }
+        for h in 6..=8 {
+            state.end_of_block(h, 401);
+        }
+        // Threshold crossed in L2 block 9 at L1=402.
+        state.current_window_atoms = RETARGET_MINT_WINDOW_ATOMS;
+        state.end_of_block(9, 402);
+
+        // Δ_actual = 402 - 400 = 2 L1 blocks. M_obs = M_w / 2.
+        // Expected ratio = M* / M_obs = TARGET_ATOMS_PER_BLOCK /
+        // (M_w / 2). With the demo constants (M_w=100M, M*=1M),
+        // that's 1e6 / 50e6 = 0.02, clamped to 1/MAX_FACTOR=0.5.
+        // So r halves.
+        assert!(
+            (state.current_r - r0 / RETARGET_MAX_FACTOR).abs() < 1e-12,
+            "expected r to halve under max-factor clamp; got {} vs r0={}",
+            state.current_r, r0,
+        );
+        assert_eq!(state.current_window_atoms, 0);
+        assert_eq!(state.current_window_start_l1_height, None);
+    }
+
     #[test]
     fn account_inclusion_proof_verifies_against_accounts_root() {
         let secp = Secp256k1::new();

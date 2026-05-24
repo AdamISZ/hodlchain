@@ -456,6 +456,17 @@ pub struct BalanceOutput {
     pub nonce: u64,
 }
 
+/// "Soft" balance — reads directly from the **sequencer**, which
+/// reflects the current state including L2 blocks produced but not
+/// yet L1-attested. This is what the UI's headline balance figure
+/// should use: it updates within one L2 block interval (~30s by
+/// default) of a transfer landing in a sequencer-built block.
+///
+/// For the trustless / L1-anchored view, see `verify_balance` or
+/// `light_balance`. Reading from the node here (the previous
+/// default) caused the headline balance to lag by 1–2 L1 blocks —
+/// effectively the same value as the verified balance, which made
+/// the "SOFT" / "L1-confirmed" pill distinction in the GUI a lie.
 pub async fn balance(wallet_path: &Path, input: BalanceInput) -> Result<BalanceOutput> {
     let wf = WalletFile::load(wallet_path)?;
     let secp = Secp256k1::new();
@@ -464,7 +475,7 @@ pub async fn balance(wallet_path: &Path, input: BalanceInput) -> Result<BalanceO
         None => wf.xonly_pubkey(&secp)?,
     };
     let api = ApiClient::new(wf.sequencer_url.clone(), wf.node_url.clone());
-    let bal = api.balance(&target).await?;
+    let bal = api.balance_via_sequencer(&target).await?;
     Ok(BalanceOutput {
         address: target,
         balance: bal.balance,

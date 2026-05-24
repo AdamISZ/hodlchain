@@ -173,8 +173,11 @@ are the same as Linux. Wallet files live at
 
 ## A complete first-run flow
 
-After the wizard completes, the dashboard shows balance 0 and a
-verified head at L2 height 0. To actually try the mint loop:
+After the wizard completes, the dashboard shows balance 0 (with a
+`[SOFT]` pill — sequencer-acknowledged — and a subsidiary
+"L1-confirmed" line just below, matching `0` while there's no
+activity). The dashboard auto-refreshes every 10 seconds. To
+actually try the mint loop:
 
 1. **Click "deposit (mint)"**. Pick a short lock — try `T = 50`
    blocks for a quick demo. Click **derive deposit address**.
@@ -188,22 +191,57 @@ verified head at L2 height 0. To actually try the mint loop:
    every 5s and should switch to **confirmed** automatically. (You
    can also click **check now** to force a poll.) Once confirmed,
    click **submit mint message**.
-5. Mine two more L1 blocks so the sequencer produces the L2 block
-   *and* its attestation confirms:
+5. The wallet shows a `[SOFT]` pill on the result panel — the
+   sequencer has acknowledged the mint and committed to including
+   it at a specific L2 height. Mine more L1 blocks so the
+   attestation that covers that L2 height confirms on L1:
    ```bash
    ./hodl-regtest mine 2
    ```
-6. Click **refresh** on the dashboard — your balance should
-   populate. The exact amount depends on the active `r` and your
-   chosen `T`; the **overview** tab has a live snapshot of both,
-   plus a mint calculator you can use to predict the result of
-   future deposits:
+   The pill flips to `[L1-CONFIRMED]` automatically as the L1
+   attestation catches up — no need to click refresh. On the
+   dashboard the headline balance updates immediately (it's the
+   soft value); the small "L1-confirmed" subsidiary line below
+   it lags slightly until the attestation lands.
+6. The **overview** tab has a live snapshot of the chain's `r`
+   and retarget window, plus a mint calculator you can use to
+   predict the result of future deposits:
 
    ![blockchain overview tab: chain head, total minted supply, current r and retarget-window progress, mint calculator](overviewtab.png)
+
+For transfers, the **send** tab shows a live "amount / + fee /
+= total" preview as you type. The chain charges a flat 0.01%
+protocol fee (with a 100-atom floor) on every transfer; the fee
+credits the sequencer's L2 account. The receipt panel after
+submitting includes the same breakdown plus the soft → L1-confirmed
+transition you saw on the mint flow.
 
 After your lock blocks elapse you can spend the deposit back to any
 L1 address from the **reclaim** tab. Use
 `./hodl-regtest mine <enough-blocks>` to cross the CSV threshold.
+
+## Soft vs. L1-confirmed: what the pills mean
+
+The wallet distinguishes two confirmation tiers:
+
+- **`[SOFT]`** — the sequencer has accepted your tx and signed
+  a receipt promising inclusion at a specific L2 height
+  (current head + 1). Visible within a second or two of submit.
+  Backed by sequencer trust: if the sequencer ever signs two
+  conflicting receipts for the same tx, anyone holding both can
+  prove the misbehaviour against the sequencer's published
+  identity pubkey.
+- **`[L1-CONFIRMED]`** — the L2 block containing your tx has
+  been attested to Bitcoin and the wallet has verified the
+  attestation via a light walk. Backed by Bitcoin's security
+  model. Takes ~1–2 L1 blocks to land after the soft-conf
+  (because the sequencer's attestation tx for the L2 block
+  needs to confirm on L1).
+
+For everyday transfers the soft confirmation is what you act
+on. For "this matters, wait until it's anchored" cases (large
+amounts, exchange deposits), wait for the pill to flip to
+L1-confirmed.
 
 ---
 
@@ -250,7 +288,9 @@ discovery.
 - **GUI shows "could not start"** — the backend isn't reachable on
   the URLs you typed. Run `./hodl-regtest status`; if everything's
   stopped, `start` it.
-- **Balance not updating after a mint** — minting events show up
-  in the balance after **two** L1 blocks: one for the sequencer to
-  build the L2 block + post the attestation, one for the attestation
-  to confirm. Run `./hodl-regtest mine 2` after submitting.
+- **Balance not updating after a mint** — the headline (soft)
+  balance updates within ~30 seconds (one L2 block interval) of
+  submitting the mint message. The subsidiary "L1-confirmed"
+  line trails by 1–2 L1 blocks. If the soft balance never moves,
+  the sequencer probably rejected the mint — check the receipt
+  panel on the Mint view or run `./hodl-regtest logs` for hints.
