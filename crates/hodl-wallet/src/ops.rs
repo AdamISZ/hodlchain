@@ -313,6 +313,10 @@ pub struct MintMessageOutput {
     pub mint_amount: Option<u64>,
     pub nullifier_hex: Option<String>,
     pub error: Option<String>,
+    /// Sequencer-signed soft-confirmation receipt promising inclusion
+    /// at `target_l2_height`. Present on accept; UIs can show the
+    /// distinction between "sequencer acknowledged" and "L1-confirmed".
+    pub soft_conf: Option<hodl_core::rpc::SoftConf>,
 }
 
 pub async fn mint_message(wallet_path: &Path, input: MintMessageInput) -> Result<MintMessageOutput> {
@@ -372,6 +376,7 @@ pub async fn mint_message(wallet_path: &Path, input: MintMessageInput) -> Result
         mint_amount: resp.mint_amount,
         nullifier_hex: resp.nullifier_hex,
         error: resp.error,
+        soft_conf: resp.soft_conf,
     })
 }
 
@@ -395,6 +400,8 @@ pub struct TransferOutput {
     /// Convenience: `amount + fee`. The sender's balance decreases by
     /// this much; the recipient receives `amount`.
     pub total: u64,
+    /// Sequencer-signed soft-confirmation receipt. Present on accept.
+    pub soft_conf: Option<hodl_core::rpc::SoftConf>,
 }
 
 /// Mirror of the on-chain formula. Kept in sync with
@@ -427,6 +434,7 @@ pub async fn transfer(wallet_path: &Path, input: TransferInput) -> Result<Transf
         error: resp.error,
         fee,
         total: input.amount.saturating_add(fee),
+        soft_conf: resp.soft_conf,
     })
 }
 

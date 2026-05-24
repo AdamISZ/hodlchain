@@ -1,5 +1,6 @@
 //! Shared state held by the HTTP server and the producer loop.
 
+use bitcoin::secp256k1::{Keypair, XOnlyPublicKey};
 use hodl_core::hash::H256;
 use hodl_core::state::LedgerState;
 use hodl_core::tx::{MintEntry, SignedTransfer};
@@ -39,14 +40,25 @@ pub struct Shared {
     pub state: Mutex<LedgerState>,
     pub mempool: Mutex<Mempool>,
     pub head: Mutex<HeadInfo>,
+    /// Sequencer's L2 identity keypair. Used to sign soft-conf
+    /// receipts and to identify the producer of each L2 block.
+    /// Generated on first chain init and persisted in the store.
+    pub identity: Keypair,
+    /// Cached x-only pubkey form of `identity` — same value as the
+    /// `producer` field in every L2 block this sequencer produces,
+    /// and as `sequencer_fee_address` in the genesis state.
+    pub identity_pubkey: XOnlyPublicKey,
 }
 
 impl Shared {
-    pub fn new(state: LedgerState, head: HeadInfo) -> Self {
+    pub fn new(state: LedgerState, head: HeadInfo, identity: Keypair) -> Self {
+        let (identity_pubkey, _) = identity.x_only_public_key();
         Self {
             state: Mutex::new(state),
             mempool: Mutex::new(Mempool::default()),
             head: Mutex::new(head),
+            identity,
+            identity_pubkey,
         }
     }
 }

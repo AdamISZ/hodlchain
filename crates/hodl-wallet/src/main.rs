@@ -327,6 +327,12 @@ async fn cmd_mint_message(wallet_path: &std::path::Path, args: MintMessageArgs) 
             "accepted: mint_amount={:?} nullifier={:?}",
             out.mint_amount, out.nullifier_hex
         );
+        if let Some(sc) = &out.soft_conf {
+            println!(
+                "  soft-conf: target L2 height {}, accepted_at unix {}",
+                sc.target_l2_height, sc.accepted_at_unix
+            );
+        }
     } else {
         println!("rejected: {}", out.error.unwrap_or_default());
     }
@@ -348,6 +354,12 @@ async fn cmd_transfer(wallet_path: &std::path::Path, args: TransferArgs) -> Resu
         println!("  amount: {} atoms", args.amount);
         println!("  fee:    {} atoms", out.fee);
         println!("  total:  {} atoms (deducted from sender)", out.total);
+        if let Some(sc) = &out.soft_conf {
+            println!(
+                "  soft-conf: target L2 height {}, accepted_at unix {}",
+                sc.target_l2_height, sc.accepted_at_unix
+            );
+        }
     } else {
         println!("rejected: {}", out.error.unwrap_or_default());
     }

@@ -16,6 +16,28 @@ pub struct SequencerL1 {
     client: Mutex<Client>,
 }
 
+/// L1-side status of a previously-posted attestation tx, as seen by
+/// the sequencer's bitcoind wallet. Drives Phase-4 reorg handling.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AttestationStatus {
+    /// Tx is in the mempool but not yet in a block (confirmations = 0).
+    Mempool,
+    /// Tx is in the canonical chain at `block_height` (Some after a
+    /// confirmation; None during the brief gettransaction race).
+    Confirmed {
+        confirmations: u32,
+        block_height: Option<u32>,
+    },
+    /// Tx was mined but the block it was in has been orphaned. The
+    /// tx is back in the wallet's view with negative confirmations;
+    /// bitcoind will typically try to re-mine it.
+    Reorged,
+    /// Tx is no longer known to the wallet at all (evicted or
+    /// conflict-resolved). Caller must recover by reposting from the
+    /// previously-spent anchor.
+    Missing,
+}
+
 impl SequencerL1 {
     pub fn connect(cfg: &SequencerConfig) -> Result<Self> {
         let auth = cfg.bitcoincore_auth();
@@ -68,6 +90,57 @@ impl SequencerL1 {
             .ok_or_else(|| anyhow!("listunspent entry missing vout: {best}"))?
             as u32;
         Ok(OutPoint { txid: Txid::from_str(txid)?, vout })
+    }
+
+    /// Status of an attestation tx the sequencer previously posted.
+    /// Reorg-aware: bitcoind's wallet view tracks `confirmations` for
+    /// any tx it broadcast, and `confirmations` flips negative if the
+    /// tx was orphaned (returned to the mempool) or to a deeper
+    /// negative if conflict-evicted entirely.
+    pub fn attestation_status(&self, txid: &Txid) -> Result<AttestationStatus> {
+        let c = self.client.lock().unwrap();
+        // gettransaction returns wallet-local info incl. negative
+        // confirmations for orphaned/conflicted txs.
+        let result: Value = match c.call(
+            "gettransaction",
+            &[json!(txid.to_string()), json!(true), json!(true)],
+        ) {
+            Ok(v) => v,
+            Err(e) => {
+                // -5 = "Invalid or non-wallet transaction id" — the
+                // tx isn't in our wallet's view at all. Treat as
+                // "gone from L1" so the caller can resurrect.
+                let msg = e.to_string();
+                if msg.contains("Invalid or non-wallet") || msg.contains("not in mempool") {
+                    return Ok(AttestationStatus::Missing);
+                }
+                bail!("gettransaction({txid}) failed: {e}");
+            }
+        };
+        let confirmations = result
+            .get("confirmations")
+            .and_then(|v| v.as_i64())
+            .ok_or_else(|| anyhow!("gettransaction reply has no confirmations: {result}"))?;
+        if confirmations < 0 {
+            // Reorged out: the tx was once mined but is no longer in
+            // the canonical chain. bitcoind may still hold it in
+            // mempool (it will try to re-mine it). Treat as Mempool
+            // for now; the caller decides whether to wait or recover.
+            return Ok(AttestationStatus::Reorged);
+        }
+        if confirmations == 0 {
+            return Ok(AttestationStatus::Mempool);
+        }
+        // confirmations >= 1: in the canonical chain. blockheight is
+        // set in this case.
+        let blockheight = result
+            .get("blockheight")
+            .and_then(|v| v.as_u64())
+            .map(|h| h as u32);
+        Ok(AttestationStatus::Confirmed {
+            confirmations: confirmations as u32,
+            block_height: blockheight,
+        })
     }
 
     /// Broadcast an OP_RETURN attestation tx as the next link in the

@@ -24,6 +24,7 @@
 
 use anyhow::Result;
 use bitcoin::secp256k1::Secp256k1;
+use bitcoin::{OutPoint, Txid};
 use hodl_core::block::{L2Block, L2BlockHeader};
 use hodl_core::hash::H256;
 use hodl_core::op_return::Attestation;
@@ -31,12 +32,19 @@ use hodl_core::proof::MintProof;
 use hodl_core::state::LedgerState;
 use hodl_core::tx::{L2Tx, MintEntry};
 use hodl_core::witness::BlockWitness;
+use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use crate::bitcoind::SequencerL1;
+use crate::bitcoind::{AttestationStatus, SequencerL1};
 use crate::shared::{HeadInfo, Shared};
-use crate::store::Store;
+use crate::store::{PendingAttestation, Store};
+
+/// L1 confirmation depth at which we consider an attestation tx
+/// final and stop tracking it for reorg recovery. Bitcoin reorgs of
+/// depth ≥ 2 are rare in practice (single-digit per year
+/// historically); 2 is the conservative default for the POC.
+const REORG_FINALITY_DEPTH: u32 = 2;
 
 pub struct Producer {
     pub shared: Arc<Shared>,
@@ -69,6 +77,15 @@ impl Producer {
                     }
                 }
                 _ = l1_tick.tick() => {
+                    // Two L1-side tasks per tick: reorg-monitor
+                    // any pending attestations, then post a fresh
+                    // one if L1 has advanced. The monitor goes
+                    // first so a reorg recovery can revert the
+                    // anchor before the new post tries to chain
+                    // from it.
+                    if let Err(e) = self.monitor_pending().await {
+                        tracing::error!(error = ?e, "pending attestation monitor failed");
+                    }
                     if let Err(e) = self.check_and_attest().await {
                         tracing::error!(error = ?e, "attestation check failed");
                     }
@@ -163,9 +180,8 @@ impl Producer {
             state_root,
             timestamp: now,
             anchor_outpoint: None,
-            // Sequencer identity isn't wired through genesis yet
-            // (Phase 3). Until then, producer is None.
-            producer: None,
+            producer: Some(self.shared.identity_pubkey),
+            sequencer_fee_address: None, // genesis-only field
         };
         let block = L2Block { header, txs };
         let block_hash = block.hash();
@@ -253,12 +269,25 @@ impl Producer {
         };
 
         let att = Attestation::new(head.height, head.block_hash, head.state_root);
+        let spent_anchor = anchor;
         let l1 = self.l1.clone();
         match tokio::task::spawn_blocking(move || l1.post_attestation_chained(&att, anchor)).await? {
             Ok((txid, new_anchor)) => {
                 let s = self.store.lock().unwrap();
                 s.set_anchor(&new_anchor)?;
                 s.set_last_attested_l1_height(tip)?;
+                // Track this attestation until it reaches
+                // REORG_FINALITY_DEPTH L1 confirmations. The
+                // monitor_pending tick checks on each L1 poll.
+                let mut pending = s.pending_attestations()?;
+                pending.push(PendingAttestation {
+                    txid: txid.to_string(),
+                    spent_anchor: format!("{}:{}", spent_anchor.txid, spent_anchor.vout),
+                    new_anchor: format!("{}:{}", new_anchor.txid, new_anchor.vout),
+                    l2_head_height: head.height,
+                    posted_at_l1_height: tip,
+                });
+                s.set_pending_attestations(&pending)?;
                 tracing::info!(
                     l1_tip = tip,
                     l2_head = head.height,
@@ -273,6 +302,117 @@ impl Producer {
         }
         Ok(())
     }
+
+    /// Walk every still-pending attestation; promote those that have
+    /// reached `REORG_FINALITY_DEPTH`, retry those still in mempool,
+    /// and recover from L1 reorgs that have evicted the tx entirely.
+    async fn monitor_pending(&self) -> Result<()> {
+        let pending = {
+            let s = self.store.lock().unwrap();
+            s.pending_attestations()?
+        };
+        if pending.is_empty() {
+            return Ok(());
+        }
+
+        let mut surviving = Vec::with_capacity(pending.len());
+        let mut anchor_to_revert: Option<OutPoint> = None;
+
+        for p in pending {
+            let txid = Txid::from_str(&p.txid)
+                .map_err(|e| anyhow::anyhow!("malformed pending txid {}: {e}", p.txid))?;
+            let l1 = self.l1.clone();
+            let status = tokio::task::spawn_blocking(move || l1.attestation_status(&txid)).await??;
+
+            match status {
+                AttestationStatus::Confirmed { confirmations, block_height } => {
+                    if confirmations >= REORG_FINALITY_DEPTH {
+                        tracing::info!(
+                            txid = %p.txid,
+                            l2_head = p.l2_head_height,
+                            confirmations,
+                            block_height = ?block_height,
+                            "attestation finalised (≥ REORG_FINALITY_DEPTH); dropping from pending"
+                        );
+                        // Drop from list — past reorg risk.
+                    } else {
+                        tracing::trace!(
+                            txid = %p.txid,
+                            confirmations,
+                            block_height = ?block_height,
+                            "attestation confirming"
+                        );
+                        surviving.push(p);
+                    }
+                }
+                AttestationStatus::Mempool => {
+                    // Still in flight; wait. (No retry — bitcoind
+                    // handles rebroadcasts.)
+                    tracing::trace!(txid = %p.txid, "attestation still in mempool");
+                    surviving.push(p);
+                }
+                AttestationStatus::Reorged => {
+                    // Bitcoind still has it; it'll be re-mined. Hold
+                    // off treating this as a recovery case unless it
+                    // stays Reorged across several ticks. For now
+                    // just keep tracking.
+                    tracing::warn!(
+                        txid = %p.txid,
+                        l2_head = p.l2_head_height,
+                        "attestation tx reorged but still in mempool — bitcoind will re-mine"
+                    );
+                    surviving.push(p);
+                }
+                AttestationStatus::Missing => {
+                    // Tx is gone from bitcoind's view entirely. The
+                    // chain anchor at `new_anchor` doesn't exist on
+                    // L1 anymore. Revert to `spent_anchor` so the
+                    // next `check_and_attest` can chain from there.
+                    // We also rewind `last_attested_l1_height` so
+                    // the next L1 tick fires a fresh post.
+                    let spent = parse_outpoint(&p.spent_anchor)?;
+                    tracing::warn!(
+                        txid = %p.txid,
+                        spent_anchor = %p.spent_anchor,
+                        new_anchor = %p.new_anchor,
+                        l2_head = p.l2_head_height,
+                        "attestation tx missing from L1 (reorged + evicted); \
+                         reverting anchor to spent and re-posting on next tick"
+                    );
+                    anchor_to_revert = Some(spent);
+                    // Don't carry forward in `surviving`.
+                }
+            }
+        }
+
+        {
+            let s = self.store.lock().unwrap();
+            s.set_pending_attestations(&surviving)?;
+            if let Some(revert_to) = anchor_to_revert {
+                s.set_anchor(&revert_to)?;
+                // Rewind so the next L1 advance triggers a fresh
+                // attestation covering the current L2 head, chained
+                // from `revert_to`. We rewind by 1 to be sure tip >
+                // last_attested at the next check.
+                let last = s.last_attested_l1_height()?.unwrap_or(0);
+                if last > 0 {
+                    s.set_last_attested_l1_height(last.saturating_sub(1))?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+}
+
+fn parse_outpoint(s: &str) -> Result<OutPoint> {
+    let (txid, vout) = s
+        .split_once(':')
+        .ok_or_else(|| anyhow::anyhow!("malformed outpoint: {s}"))?;
+    Ok(OutPoint {
+        txid: Txid::from_str(txid)?,
+        vout: vout.parse()?,
+    })
 }
 
 fn parse_l1_block_hash(s: &str) -> Result<H256> {

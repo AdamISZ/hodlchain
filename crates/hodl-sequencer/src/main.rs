@@ -7,7 +7,8 @@ mod producer;
 mod shared;
 mod store;
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
+use bitcoin::secp256k1::{Keypair, Secp256k1, SecretKey};
 use clap::Parser;
 use hodl_core::block::genesis;
 use hodl_core::hash::H256;
@@ -72,8 +73,18 @@ async fn run(config_path: &std::path::Path) -> Result<()> {
     let l1 = Arc::new(SequencerL1::connect(&cfg)?);
     let store = Arc::new(Mutex::new(Store::open(&cfg.db_path)?));
 
-    let (state, head) = bootstrap(&cfg, &l1, &store).await?;
-    let shared = Arc::new(Shared::new(state, head));
+    // Load or generate the sequencer's L2 identity keypair (used to
+    // sign soft-conf receipts and as the `producer` field in every
+    // L2 block this sequencer produces). On a fresh chain, the key
+    // is generated and persisted before bootstrap so genesis can
+    // commit to it as `producer` + `sequencer_fee_address`.
+    let identity = load_or_create_identity(&store)?;
+    let (state, head) = bootstrap(&cfg, &l1, &store, &identity).await?;
+    let shared = Arc::new(Shared::new(state, head, identity));
+    tracing::info!(
+        pubkey = %hex::encode(shared.identity_pubkey.serialize()),
+        "sequencer identity loaded"
+    );
 
     let producer = Producer {
         shared: shared.clone(),
@@ -94,10 +105,33 @@ async fn run(config_path: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
+/// Load the sequencer's L2 identity key from the store, generating
+/// a fresh keypair (and persisting it) if absent. This MUST run
+/// before `bootstrap` so the genesis block can commit to the
+/// pubkey as `producer` + `sequencer_fee_address`.
+fn load_or_create_identity(store: &Arc<Mutex<Store>>) -> Result<Keypair> {
+    let secp = Secp256k1::new();
+    let s = store.lock().unwrap();
+    if let Some(hex) = s.sequencer_seckey_hex()? {
+        let bytes = hex::decode(&hex)
+            .with_context(|| format!("decode sequencer_seckey hex: {hex}"))?;
+        let sk = SecretKey::from_slice(&bytes)
+            .map_err(|e| anyhow!("invalid sequencer_seckey: {e}"))?;
+        Ok(Keypair::from_secret_key(&secp, &sk))
+    } else {
+        let kp = Keypair::new(&secp, &mut bitcoin::secp256k1::rand::thread_rng());
+        let sk_hex = hex::encode(kp.secret_key().secret_bytes());
+        s.set_sequencer_seckey_hex(&sk_hex)?;
+        tracing::info!("generated new sequencer identity keypair");
+        Ok(kp)
+    }
+}
+
 async fn bootstrap(
     cfg: &SequencerConfig,
     l1: &Arc<SequencerL1>,
     store: &Arc<Mutex<Store>>,
+    identity: &Keypair,
 ) -> Result<(LedgerState, HeadInfo)> {
     let snapshot = { store.lock().unwrap().load_latest_state()? };
     if let Some((height, state)) = snapshot {
@@ -140,11 +174,21 @@ async fn bootstrap(
         let anchor_0 = tokio::task::spawn_blocking(move || l1c.pick_initial_anchor()).await??;
         tracing::info!(anchor = %format_args!("{}:{}", anchor_0.txid, anchor_0.vout), "selected anchor_0");
 
-        // No sequencer identity or fee address yet (Phase 3 wires
-        // those through). Genesis records `None` for both; the
-        // chain commits to "fees burn, producer implicit".
-        let block = genesis(l1_block_hash, target, now, anchor_0, None, None);
-        let state = LedgerState::new();
+        // Genesis commits to the sequencer's L2 identity as both
+        // the block `producer` and the chain's `sequencer_fee_address`
+        // (so fees collected on this chain go to the sequencer, and
+        // every block names the responsible signer).
+        let (identity_pubkey, _) = identity.x_only_public_key();
+        let block = genesis(
+            l1_block_hash,
+            target,
+            now,
+            anchor_0,
+            Some(identity_pubkey),
+            Some(identity_pubkey),
+        );
+        let mut state = LedgerState::new();
+        state.sequencer_fee_address = Some(identity_pubkey);
         // Genesis carries no txs; its witness is trivially empty.
         let witness = hodl_core::witness::BlockWitness::build(&state, &block.txs, 0);
         {

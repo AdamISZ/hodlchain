@@ -139,12 +139,19 @@ async fn bootstrap(
             cfg.l1_genesis_height
         );
     }
-    let state = LedgerState::new();
+    // Seed the chain-wide fee destination from the genesis header
+    // (set by the sequencer at chain init; immutable thereafter).
+    // Required before computing state_root since the v3 state_root
+    // commits to the fee address.
+    let mut state = LedgerState::new();
+    state.sequencer_fee_address = genesis.header.sequencer_fee_address;
     if state.state_root() != genesis.header.state_root {
         bail!(
-            "L2 genesis state root mismatch: empty-state root {} != genesis header {}",
+            "L2 genesis state root mismatch: computed {} != genesis header {} \
+             (sequencer_fee_address in header: {:?})",
             state.state_root(),
-            genesis.header.state_root
+            genesis.header.state_root,
+            genesis.header.sequencer_fee_address,
         );
     }
 

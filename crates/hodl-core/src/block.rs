@@ -41,18 +41,29 @@ pub struct L2BlockHeader {
     /// vout=1 (with the attestation OP_RETURN at vout=0).
     #[cfg_attr(feature = "std", schema(value_type = Option<crate::schemas::OutPointWire>))]
     pub anchor_outpoint: Option<OutPoint>,
-    /// L2 identity of whoever produced this block. `None` while the
-    /// sequencer identity key isn't yet wired through genesis
-    /// (pre-Phase-3). The field is in the header *now* so a future
-    /// multi-sequencer / threshold-signing design — where each
-    /// block names the responsible party — doesn't require a hard
-    /// fork. Under threshold signing it would hold a single
-    /// aggregated L2 address.
+    /// L2 identity of whoever produced this block. The field is in
+    /// every header so a future multi-sequencer / threshold-signing
+    /// design — where each block names the responsible party —
+    /// doesn't require a hard fork. Under threshold signing it
+    /// would hold a single aggregated L2 address.
     #[cfg_attr(
         feature = "std",
         schema(value_type = Option<String>, example = "0000000000000000000000000000000000000000000000000000000000000001")
     )]
     pub producer: Option<L2Address>,
+    /// Chain-wide fee destination, set at genesis and immutable
+    /// thereafter. Some only in the genesis header (height 0);
+    /// None on every subsequent block. Followers / light clients
+    /// use this to seed their `LedgerState.sequencer_fee_address`
+    /// before computing genesis state_root. Distinct from
+    /// `producer` so a future multi-sequencer chain — where each
+    /// block names a different responsible party — can still
+    /// commit to a single fee destination from chain init.
+    #[cfg_attr(
+        feature = "std",
+        schema(value_type = Option<String>, example = "0000000000000000000000000000000000000000000000000000000000000001")
+    )]
+    pub sequencer_fee_address: Option<L2Address>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -77,6 +88,8 @@ impl L2BlockHeader {
     ///   || if has_anchor: anchor_outpoint.txid(32) || anchor_outpoint.vout(4)
     ///   || has_producer(1)
     ///   || if has_producer: producer.serialize(32)
+    ///   || has_fee_address(1)
+    ///   || if has_fee_address: sequencer_fee_address.serialize(32)
     /// ```
     pub fn block_hash(&self) -> H256 {
         let mut h = Sha256::new();
@@ -102,6 +115,15 @@ impl L2BlockHeader {
             Some(p) => {
                 h.update([1u8]);
                 h.update(p.serialize());
+            }
+            None => {
+                h.update([0u8]);
+            }
+        }
+        match &self.sequencer_fee_address {
+            Some(a) => {
+                h.update([1u8]);
+                h.update(a.serialize());
             }
             None => {
                 h.update([0u8]);
@@ -159,6 +181,7 @@ pub fn genesis(
         timestamp,
         anchor_outpoint: Some(anchor_outpoint),
         producer,
+        sequencer_fee_address,
     };
     L2Block { header, txs }
 }

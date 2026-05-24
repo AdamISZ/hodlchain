@@ -14,11 +14,12 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use bitcoin::secp256k1::{Message, Secp256k1, XOnlyPublicKey};
 use hodl_core::proof::MintProof;
+use hodl_core::hash::H256;
 use hodl_core::rpc::{
-    BalanceResponse, HeadResponse, SubmitMintRequest, SubmitMintResponse,
+    BalanceResponse, HeadResponse, SoftConf, SubmitMintRequest, SubmitMintResponse,
     SubmitTransferRequest, SubmitTransferResponse,
 };
-use hodl_core::tx::{L2Address, MintEntry};
+use hodl_core::tx::{L2Address, L2Tx, MintEntry};
 use std::sync::{Arc, Mutex};
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
@@ -26,6 +27,29 @@ use utoipa_swagger_ui::SwaggerUi;
 use crate::bitcoind::SequencerL1;
 use crate::shared::Shared;
 use crate::store::Store;
+
+/// Build a sequencer-signed `SoftConf` receipt promising inclusion
+/// of `tx_hash` at the next L2 block (current head + 1). Stamped
+/// with current Unix time so light clients can correlate receipts
+/// against block-build timing. Signed with the sequencer's L2
+/// identity key.
+fn sign_soft_conf(shared: &Shared, tx_hash: H256) -> SoftConf {
+    let secp = Secp256k1::signing_only();
+    let target_l2_height = shared.head.lock().unwrap().height + 1;
+    let accepted_at_unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let digest = SoftConf::sighash(tx_hash, target_l2_height, accepted_at_unix).0;
+    let msg = Message::from_digest(digest);
+    let sequencer_sig = secp.sign_schnorr_no_aux_rand(&msg, &shared.identity);
+    SoftConf {
+        tx_hash,
+        target_l2_height,
+        accepted_at_unix,
+        sequencer_sig,
+    }
+}
 
 #[derive(Clone)]
 pub struct AppState {
@@ -141,6 +165,7 @@ async fn submit_mint(
                 error: Some(e.to_string()),
                 mint_amount: None,
                 nullifier_hex: None,
+                soft_conf: None,
             }));
         }
     };
@@ -157,9 +182,12 @@ async fn submit_mint(
                 error: Some("nullifier already consumed".into()),
                 mint_amount: None,
                 nullifier_hex: None,
+                soft_conf: None,
             }));
         }
     }
+    let mint_entry = MintEntry { event: credit.event, witness };
+    let tx_hash = L2Tx::Mint(mint_entry.clone()).hash();
     {
         let mut mempool = app.shared.mempool.lock().unwrap();
         if mempool.pending_nullifiers.contains(&nullifier_hex) {
@@ -168,20 +196,20 @@ async fn submit_mint(
                 error: Some("nullifier already in mempool".into()),
                 mint_amount: None,
                 nullifier_hex: None,
+                soft_conf: None,
             }));
         }
         mempool.pending_nullifiers.insert(nullifier_hex.clone());
-        mempool.mints.push(MintEntry {
-            event: credit.event,
-            witness,
-        });
+        mempool.mints.push(mint_entry);
     }
 
+    let soft_conf = sign_soft_conf(&app.shared, tx_hash);
     Ok(Json(SubmitMintResponse {
         accepted: true,
         error: None,
         mint_amount: Some(amount),
         nullifier_hex: Some(nullifier_hex),
+        soft_conf: Some(soft_conf),
     }))
 }
 
@@ -209,6 +237,7 @@ async fn submit_transfer(
         return Ok(Json(SubmitTransferResponse {
             accepted: false,
             error: Some("bad signature".into()),
+            soft_conf: None,
         }));
     }
     {
@@ -221,14 +250,21 @@ async fn submit_transfer(
                     "nonce mismatch: expected {expected}, got {}",
                     req.transfer.body.nonce
                 )),
+                soft_conf: None,
             }));
         }
     }
+    let tx_hash = L2Tx::Transfer(req.transfer.clone()).hash();
     {
         let mut mempool = app.shared.mempool.lock().unwrap();
         mempool.transfers.push(req.transfer);
     }
-    Ok(Json(SubmitTransferResponse { accepted: true, error: None }))
+    let soft_conf = sign_soft_conf(&app.shared, tx_hash);
+    Ok(Json(SubmitTransferResponse {
+        accepted: true,
+        error: None,
+        soft_conf: Some(soft_conf),
+    }))
 }
 
 #[utoipa::path(

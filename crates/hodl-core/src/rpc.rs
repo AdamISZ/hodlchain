@@ -6,7 +6,9 @@ use crate::smt::InclusionProof;
 use crate::state::StateComponents;
 use crate::tx::{Amount, L2Address, SignedTransfer};
 use alloc::string::String;
+use bitcoin::secp256k1::{schnorr, Message, Secp256k1, Verification, XOnlyPublicKey};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 /// Request body for `POST /mint`. The proof is the witness type-tagged
 /// envelope (v0 = `OutpointProof`; later: ring proof, ZK proof).
@@ -39,6 +41,12 @@ pub struct SubmitMintResponse {
     /// Dedup nullifier (hex). Populated only on accept.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nullifier_hex: Option<String>,
+    /// Sequencer-signed soft-confirmation receipt. Present on accept.
+    /// Recipients hold this as evidence that the sequencer committed
+    /// to including this tx; future work (slashing, equivocation
+    /// detection) builds on it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub soft_conf: Option<SoftConf>,
 }
 
 /// Request body for `POST /transfer`. Wraps a signed transfer.
@@ -58,6 +66,76 @@ pub struct SubmitTransferResponse {
     /// Human-readable rejection reason. Populated only on reject.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Sequencer-signed soft-confirmation receipt. Present on accept.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub soft_conf: Option<SoftConf>,
+}
+
+/// Sequencer's signed promise that an accepted tx will land in
+/// L2 block `target_l2_height` (= current head + 1 at acceptance
+/// time). The signature uses the sequencer's L2 identity key
+/// (published in the genesis header as `producer` / matching
+/// `sequencer_fee_address`).
+///
+/// **Trust posture.** Soft-conf is informational: the sequencer can
+/// in principle drop the tx at block-build time (insufficient
+/// balance after a parallel transfer, etc.) or include it at a
+/// later height (mempool overflow). The signed receipt becomes the
+/// basis for equivocation detection: if the sequencer ever signs
+/// two conflicting receipts (same tx_hash → different heights, or
+/// the included height is past the soft-confirmed target without
+/// the tx actually landing) anyone holding the receipts can prove
+/// misbehaviour. Slashing on top of this is a future item.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "std", derive(utoipa::ToSchema))]
+pub struct SoftConf {
+    /// The L2 tx hash this receipt covers.
+    pub tx_hash: H256,
+    /// L2 height the sequencer commits to including this tx at.
+    pub target_l2_height: u32,
+    /// Unix seconds at which the sequencer accepted the tx. The
+    /// signature binds this; replay-resistance comes from the
+    /// tx_hash, not the timestamp (a tx hash is unique to its
+    /// content).
+    pub accepted_at_unix: u64,
+    /// BIP340 Schnorr signature by the sequencer identity key over
+    /// `softconf_sighash(tx_hash, target_l2_height, accepted_at_unix)`.
+    /// Serialised as 64-byte hex on the wire.
+    #[cfg_attr(
+        feature = "std",
+        schema(value_type = String, example = "0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000")
+    )]
+    pub sequencer_sig: schnorr::Signature,
+}
+
+impl SoftConf {
+    /// Canonical sighash for the soft-conf payload. Light clients +
+    /// the sequencer must agree on this byte layout.
+    pub fn sighash(tx_hash: H256, target_l2_height: u32, accepted_at_unix: u64) -> H256 {
+        let mut h = Sha256::new();
+        h.update(b"hodl-softconf-v1");
+        h.update(&tx_hash.0);
+        h.update(&target_l2_height.to_be_bytes());
+        h.update(&accepted_at_unix.to_be_bytes());
+        H256(h.finalize().into())
+    }
+
+    /// Verify the embedded Schnorr signature against the sequencer's
+    /// published L2 identity pubkey. Returns Ok(()) on valid sig.
+    pub fn verify<C: Verification>(
+        &self,
+        secp: &Secp256k1<C>,
+        sequencer_pubkey: &XOnlyPublicKey,
+    ) -> Result<(), bitcoin::secp256k1::Error> {
+        let digest = Self::sighash(
+            self.tx_hash,
+            self.target_l2_height,
+            self.accepted_at_unix,
+        )
+        .0;
+        let msg = Message::from_digest(digest);
+        secp.verify_schnorr(&self.sequencer_sig, &msg, sequencer_pubkey)
+    }
 }
 
 /// Response from `GET /head`. The L2 tip the responding service knows.

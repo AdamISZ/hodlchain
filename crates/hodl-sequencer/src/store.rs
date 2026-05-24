@@ -11,8 +11,32 @@ use hodl_core::block::L2Block;
 use hodl_core::state::LedgerState;
 use hodl_core::witness::BlockWitness;
 use rusqlite::{params, Connection, OptionalExtension};
+use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::str::FromStr;
+
+/// Reorg-tracking record for one attestation tx the sequencer has
+/// posted to L1. The producer keeps a list of these in the store
+/// until each tx has reached the L1 confirmation depth required for
+/// finality (`REORG_FINALITY_DEPTH`). Pre-finalisation we poll
+/// bitcoind on each L1 tick; on detection that the tx has been
+/// reorged out and lost, the sequencer reverts the chain anchor to
+/// `spent_anchor` so the next post can chain from there.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PendingAttestation {
+    /// The attestation tx's own txid.
+    pub txid: String,
+    /// The anchor outpoint this tx spent (`txid:vout` string form).
+    pub spent_anchor: String,
+    /// The new anchor outpoint this tx created (`txid:vout` form).
+    pub new_anchor: String,
+    /// L2 head height this attestation committed to.
+    pub l2_head_height: u32,
+    /// L1 height at which the sequencer posted this attestation (NOT
+    /// necessarily the height it landed in — that's what we poll
+    /// bitcoind to find out).
+    pub posted_at_l1_height: u32,
+}
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS kv (
@@ -225,5 +249,33 @@ impl Store {
 
     pub fn set_last_attested_l1_height(&self, l1_height: u32) -> Result<()> {
         self.kv_put("last_attested_l1_height", &l1_height.to_string())
+    }
+
+    /// Sequencer L2 identity secret key (hex-encoded 32 bytes).
+    /// Generated on first chain init; persisted across restarts.
+    /// Used to sign soft-confirmation receipts and to identify the
+    /// block producer in each L2 block header.
+    pub fn sequencer_seckey_hex(&self) -> Result<Option<String>> {
+        self.kv_get("sequencer_seckey")
+    }
+
+    pub fn set_sequencer_seckey_hex(&self, hex: &str) -> Result<()> {
+        self.kv_put("sequencer_seckey", hex)
+    }
+
+    /// Read the list of pending (unfinalised) attestations. Empty
+    /// list if none. JSON-encoded in a single kv entry — simpler
+    /// than a new table for a list that's bounded by
+    /// `REORG_FINALITY_DEPTH` × attestation cadence (a handful of
+    /// entries at any time).
+    pub fn pending_attestations(&self) -> Result<Vec<PendingAttestation>> {
+        match self.kv_get("pending_attestations")? {
+            None => Ok(Vec::new()),
+            Some(s) => Ok(serde_json::from_str(&s)?),
+        }
+    }
+
+    pub fn set_pending_attestations(&self, list: &[PendingAttestation]) -> Result<()> {
+        self.kv_put("pending_attestations", &serde_json::to_string(list)?)
     }
 }
