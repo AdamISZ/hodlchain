@@ -150,9 +150,25 @@ pub fn mint_utxo(wallet_path: &Path, input: MintUtxoInput) -> Result<MintUtxoOut
     // Allocate a fresh BIP32-derived L1 mint key for this mint. Each
     // mint UTXO commits to a different user_pk on chain, so an L1
     // observer cannot trivially group mints by the same user.
+    // Validate lock_blocks BEFORE allocating a BIP32 key index. A
+    // bad input here would otherwise burn an index (the wallet's
+    // next_mint_index counter only goes up) without committing
+    // anything irreversible — but failing early is cleaner and
+    // produces a better user-facing error than letting the failure
+    // surface inside mint_address.
+    hodl_core::l1::validate_lock_blocks(input.lock_blocks).with_context(|| {
+        format!(
+            "rejecting mint-utxo request: lock_blocks={} is out of range",
+            input.lock_blocks,
+        )
+    })?;
+
     let (mint_kp, bip32_index) = wf.allocate_mint_keypair(&secp)?;
     let mint_xonly = mint_kp.x_only_public_key().0;
-    let address = mint_address(&secp, input.lock_blocks, &mint_xonly, network);
+    // lock_blocks already validated above, so the construction
+    // can't return an error here.
+    let address = mint_address(&secp, input.lock_blocks, &mint_xonly, network)
+        .expect("lock_blocks validated above");
 
     wf.append_mint(MintRecord {
         mint_address: address.to_string(),

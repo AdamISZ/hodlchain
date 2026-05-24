@@ -59,10 +59,16 @@ pub fn build_signed_reclaim_tx<C: Signing + Verification>(
     let (mint_xonly, _) = mint_kp.x_only_public_key();
 
     // Reconstruct the 2-leaf taproot under NUMS H to get the spend info
-    // (for the control block) and the prev_out's scriptPubKey.
-    let (prev_spk, spend_info) = derive_mint_taproot(secp, lock_blocks, &mint_xonly);
+    // (for the control block) and the prev_out's scriptPubKey. The
+    // mint UTXO already exists on L1 with this lock_blocks value, so
+    // by the time we're reclaiming it the value was valid at creation
+    // — but propagate any construction error anyway in case wallet
+    // state ever drifts out of sync with the chain.
+    let (prev_spk, spend_info) = derive_mint_taproot(secp, lock_blocks, &mint_xonly)
+        .with_context(|| format!("reconstruct taproot for lock_blocks={lock_blocks}"))?;
 
-    let l_spend = csv_tapleaf_script(lock_blocks, &mint_xonly);
+    let l_spend = csv_tapleaf_script(lock_blocks, &mint_xonly)
+        .with_context(|| format!("rebuild L_spend script for lock_blocks={lock_blocks}"))?;
     let l_data = data_tapleaf_script(&mint_xonly);
     let l_data_hash: TapLeafHash = tapleaf_hash(&l_data);
 

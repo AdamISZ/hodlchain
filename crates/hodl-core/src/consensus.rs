@@ -41,9 +41,23 @@ pub const ATTESTATION_VERSION: u8 = 0;
 ///   magic(4) + version(1) + height(4) + l2_block_hash(32) + state_root(32)
 pub const ATTESTATION_LEN: usize = 4 + 1 + 4 + 32 + 32;
 
-/// BIP341 H, the recommended NUMS x-only public key.
-/// Used as the internal key of every hodlchain mint Taproot output, so that the
-/// only spend path is the CLTV tapleaf.
+/// BIP341 `H`, the recommended NUMS ("nothing-up-my-sleeve") x-only
+/// public key. Used as the internal key of every hodlchain mint
+/// Taproot output, so the only spend path is the CSV tapleaf
+/// `L_spend` (no key-path escape).
+///
+/// Source: <https://github.com/bitcoin/bips/blob/master/bip-0341.mediawiki>
+/// — "Constructing and spending Taproot outputs" section. BIP341
+/// specifies `H = lift_x(0x50929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0)`,
+/// where the x-coordinate is the SHA256 hash of the standard
+/// (uncompressed) encoding of the secp256k1 generator point G. That
+/// construction is what makes `H` provably-no-known-discrete-log
+/// w.r.t. G: anyone who could derive `dlog_G(H)` would also have
+/// inverted SHA256.
+///
+/// The 32 bytes below are the raw x-coordinate (big-endian).
+/// `rust-bitcoin` doesn't expose this as a constant, so we keep our
+/// own copy; the value is fixed by the BIP and will not change.
 pub const BIP341_NUMS_H_XONLY: [u8; 32] = [
     0x50, 0x92, 0x9b, 0x74, 0xc1, 0xa0, 0x49, 0x54, 0xb7, 0x8b, 0x4b, 0x60, 0x35, 0xe9, 0x7a, 0x5e,
     0x07, 0x8a, 0x5a, 0x0f, 0x28, 0xec, 0x96, 0xd5, 0x47, 0xbf, 0xee, 0x9a, 0xce, 0x80, 0x3a, 0xc0,

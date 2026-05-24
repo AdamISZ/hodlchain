@@ -256,7 +256,15 @@ impl MintProof for OutpointProof {
         //    present, both well-formed, pk matches the signing key,
         //    `T` matches `lock_blocks`, and the namespace stamp
         //    resolves to hodlchain.
-        let expected = expected_p2tr_spk(secp, self.lock_blocks, &self.user_xonly_pubkey);
+        // `expected_p2tr_spk` re-validates `lock_blocks` and would
+        // return an error for out-of-range input — but step 1 above
+        // already returns `BadLockBlocks` for that case, so by the
+        // time we reach here it can only succeed. Belt and braces.
+        let expected = expected_p2tr_spk(secp, self.lock_blocks, &self.user_xonly_pubkey)
+            .map_err(|_| MintError::BadLockBlocks {
+                got: self.lock_blocks,
+                max: MAX_LOCK_BLOCKS,
+            })?;
         if expected != output.script_pubkey {
             return Err(MintError::ScriptMismatch);
         }
@@ -380,7 +388,7 @@ mod tests {
         let lock_blocks = 900u32;
         let create_h = 100u32;
 
-        let (spk, _) = derive_mint_taproot(&secp, lock_blocks, &xonly);
+        let (spk, _) = derive_mint_taproot(&secp, lock_blocks, &xonly).unwrap();
 
         let outpoint = OutPoint::new(Txid::all_zeros(), 0);
         let value_sat = 1_000_000_000u64;
@@ -425,7 +433,7 @@ mod tests {
         let lock_blocks = 1000u32;
 
         // UTXO built for A
-        let (spk_a, _) = derive_mint_taproot(&secp, lock_blocks, &pk_a);
+        let (spk_a, _) = derive_mint_taproot(&secp, lock_blocks, &pk_a).unwrap();
 
         let outpoint = OutPoint::new(Txid::all_zeros(), 0);
         let l1 = fake_l1_with(outpoint, 1_000_000_000, spk_a, 100);
@@ -455,7 +463,7 @@ mod tests {
         let secp = Secp256k1::new();
         let kp = Keypair::new(&secp, &mut bitcoin::secp256k1::rand::thread_rng());
         let (xonly, _) = kp.x_only_public_key();
-        let (spk, _) = derive_mint_taproot(&secp, 1000, &xonly);
+        let (spk, _) = derive_mint_taproot(&secp, 1000, &xonly).unwrap();
 
         let outpoint = OutPoint::new(Txid::all_zeros(), 0);
         let l1 = fake_l1_with(outpoint, 1_000_000_000, spk, 100);
@@ -488,7 +496,7 @@ mod tests {
         let (xonly, _) = kp.x_only_public_key();
         let lock_blocks = 50u32;
         let create_h = 100u32;
-        let (spk, _) = derive_mint_taproot(&secp, lock_blocks, &xonly);
+        let (spk, _) = derive_mint_taproot(&secp, lock_blocks, &xonly).unwrap();
         let outpoint = OutPoint::new(Txid::all_zeros(), 0);
         let l1 = fake_l1_with(outpoint, 1_000_000_000, spk, create_h);
 
@@ -520,7 +528,7 @@ mod tests {
         let (xonly, _) = kp.x_only_public_key();
         let lock_blocks = 1000u32;
         let create_h = 100u32;
-        let (spk, _) = derive_mint_taproot(&secp, lock_blocks, &xonly);
+        let (spk, _) = derive_mint_taproot(&secp, lock_blocks, &xonly).unwrap();
         let outpoint = OutPoint::new(Txid::all_zeros(), 0);
         // Fake L1 tip is 200; claim a height after that.
         let l1 = fake_l1_with(outpoint, 1_000_000_000, spk, create_h);
