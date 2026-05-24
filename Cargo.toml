@@ -7,6 +7,7 @@ members = [
     "crates/hodl-node",
     "crates/hodl-desktop",
     "crates/hodl-regtest",
+    "sim/hodl-simulate",
 ]
 # Plain `cargo check`/`cargo test`/`cargo build` only touches the
 # headless crates. The Tauri app pulls in heavier system dependencies
@@ -14,6 +15,9 @@ members = [
 # core protocol code; build it explicitly with `cargo tauri dev` /
 # `cargo tauri build`, or `cargo build -p hodl-desktop` once those
 # deps are installed. See crates/hodl-desktop/README.md.
+# hodl-simulate is a side tool for retargeting-behaviour exploration
+# (see sim/README.md). Build it explicitly with `-p hodl-simulate`
+# rather than have every default `cargo build` pull it in.
 default-members = [
     "crates/hodl-core",
     "crates/hodl-wallet",
