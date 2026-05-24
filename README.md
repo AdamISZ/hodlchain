@@ -1,7 +1,6 @@
 # hodlchain
 
-A proof-of-concept Layer 2 anchored to Bitcoin, exploring a fair-launch
-issuance primitive: users provably commit Bitcoin via a relative
+A proof-of-concept of what is laid out [here](https://github.com/AdamISZ/hodlchain-paper), exploring a fair-issuance primitive anchored to Bitcoin: users provably commit Bitcoin via a relative
 timelock (`OP_CHECKSEQUENCEVERIFY` and/or `OP_CHECKLOCKTIMEVERIFY`) on a taproot output for a chosen
 duration, and the L2 mints new tokens in return — bounded by the value
 locked and superlinear in lock duration, saturating at the locked value
@@ -9,18 +8,18 @@ as the duration approaches infinity. The BTC is recoverable; nothing
 is destroyed.
 
 > **Status**: research POC. Single-sequencer L2 on Bitcoin regtest /
-> signet. Not for mainnet, not audited, not stable. The protocol design
-> is the deliverable; everything in this repo runs but is shaped to
-> teach, not to ship.
+> signet. Not for mainnet, not audited, not stable.
 
 ![hodlchain desktop wallet — blockchain overview tab showing chain head, total minted supply, current r, and retarget-window progress](docs/overviewtab.png)
 
 ## Quick start
 
-- **Run the headless daemons + CLI wallet from source** →
-  [`docs/build-from-source.md`](docs/build-from-source.md)
+Most likely you want the first if just testing.
+
 - **Use the desktop wallet (download release artifact)** →
   [`docs/run-the-gui.md`](docs/run-the-gui.md)
+- **Run the headless daemons + CLI wallet from source** →
+  [`docs/build-from-source.md`](docs/build-from-source.md)
 
 Both Linux and macOS are covered in each doc.
 
@@ -50,8 +49,7 @@ Both Linux and macOS are covered in each doc.
 |                        | (bitcoind + sequencer + node) with start/stop/mine/fund/reset    |
 |                        | subcommands. Persistent datadir. Ships in releases alongside     |
 |                        | the GUI.                                                         |
-| `docs/`                | `design.md`, build instructions, GUI instructions, ZKP           |
-|                        | discussion, paper PDFs.                                          |
+| `docs/`                | `design.md`, build instructions, GUI instructions, etc.          |
 | `scripts/regtest-demo.sh` | End-to-end demo against a temp bitcoind on regtest.           |
 
 ## Build and run
@@ -133,9 +131,5 @@ What's still trusted:
   what they contain. A locally-run electrs eliminates this.
 - Sequencer liveness — single sequencer; no rotation, no fallback.
 - For *mint anonymity*, full nodes also see which L1 UTXO funded a
-  given mint. Future work: anonymous mint via aut-ct ring proofs.
+  given mint. Future work: anonymous minting.
 
-
-## License
-
-Not yet specified. To be determined before any wider release.
