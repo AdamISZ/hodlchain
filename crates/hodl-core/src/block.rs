@@ -151,8 +151,8 @@ impl L2Block {
 
 /// Genesis block: height 0, all-zero parents, empty body, sentinel L1 anchor.
 ///
-/// `state_root` comes from an empty `LedgerState` (which commits to the
-/// initial `r`, retarget-window counters, and `sequencer_fee_address`).
+/// `state_root` comes from an empty `LedgerState` (which commits to
+/// the accounts root, nullifiers hash, and `sequencer_fee_address`).
 /// `anchor_outpoint` is the chain root for L1 attestation transactions;
 /// subsequent L2 blocks have `anchor_outpoint = None`. `producer` is
 /// the sequencer's L2 identity address — `None` until the sequencer

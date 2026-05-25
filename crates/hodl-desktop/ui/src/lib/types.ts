@@ -151,12 +151,6 @@ export interface LightBalanceOutput {
   balance: number;
   nonce: number;
   is_own_address: boolean;
-  /** Mint-function rate parameter at the verified head. */
-  current_r: number;
-  /** Atoms minted in the currently-open retarget window. */
-  current_window_atoms: number;
-  /** L1 height the current retarget window opened at; null in quiet periods. */
-  current_window_start_l1_height: number | null;
   /**
    * Total atoms ever minted. Light-verified on warm-start; on cold-start
    * the bootstrap snapshot value is sequencer-trusted.

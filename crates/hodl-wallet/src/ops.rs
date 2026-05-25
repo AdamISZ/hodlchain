@@ -679,14 +679,6 @@ pub struct LightBalanceOutput {
     pub balance: u64,
     pub nonce: u64,
     pub is_own_address: bool,
-    /// Mint-function rate parameter at this verified head.
-    pub current_r: f64,
-    /// Atoms minted in the currently-open retarget window. Compare
-    /// against `RETARGET_MINT_WINDOW_ATOMS` to gauge progress.
-    pub current_window_atoms: u64,
-    /// L1 height at which the current retarget window opened. `None`
-    /// during quiet periods (no mints in flight).
-    pub current_window_start_l1_height: Option<u32>,
     /// Total atoms ever minted on this chain. See VerifiedHead for
     /// trust caveat (sequencer-trusted on cold-start, verified after).
     pub total_minted_atoms: u64,
@@ -774,9 +766,6 @@ pub async fn light_balance(wallet_path: &Path, input: LightBalanceInput) -> Resu
         balance,
         nonce,
         is_own_address: target == own_addr,
-        current_r: head.current_r,
-        current_window_atoms: head.current_window_atoms,
-        current_window_start_l1_height: head.current_window_start_l1_height,
         total_minted_atoms: head.total_minted_atoms,
     };
 

@@ -25,7 +25,6 @@ pub struct SubmitMintRequest {
 }
 
 /// Response from `POST /mint`. On accept, includes the amount minted
-/// (best-effort: a retarget between submit and inclusion may shift it)
 /// and the dedup nullifier.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "std", derive(utoipa::ToSchema))]

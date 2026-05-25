@@ -13,7 +13,7 @@
 //! they apply a block (`verify_mint_entry`), so block validity is
 //! independent of trusting the sequencer.
 
-use crate::consensus::{mint_fn, ATOMS_PER_SAT, DEFAULT_R, MAX_LOCK_BLOCKS, MINT_CONFIRMATIONS};
+use crate::consensus::{mint_fn, ATOMS_PER_SAT, MAX_LOCK_BLOCKS, MINT_CONFIRMATIONS};
 use crate::l1::expected_p2tr_spk;
 use crate::tx::{L2Address, MintEntry, MintEvent};
 use alloc::vec::Vec;
@@ -50,10 +50,9 @@ impl MintProof for MintProofEnvelope {
         secp: &Secp256k1<C>,
         l1: &dyn L1View,
         l2_destination: L2Address,
-        r: f64,
     ) -> Result<MintCredit, MintError> {
         match self {
-            MintProofEnvelope::V0Outpoint(p) => p.verify(secp, l1, l2_destination, r),
+            MintProofEnvelope::V0Outpoint(p) => p.verify(secp, l1, l2_destination),
         }
     }
 }
@@ -122,7 +121,6 @@ pub trait MintProof {
         secp: &Secp256k1<C>,
         l1: &dyn L1View,
         l2_destination: L2Address,
-        r: f64,
     ) -> Result<MintCredit, MintError>;
 }
 
@@ -201,7 +199,6 @@ impl MintProof for OutpointProof {
         secp: &Secp256k1<C>,
         l1: &dyn L1View,
         l2_destination: L2Address,
-        r: f64,
     ) -> Result<MintCredit, MintError> {
         let output = l1
             .get_output(&self.outpoint)
@@ -284,8 +281,7 @@ impl MintProof for OutpointProof {
         // 4. Compute credit. T comes directly from the script-committed
         //    value, not from `unlock_height - create_height`.
         let _ = ATOMS_PER_SAT; // referenced inside mint_fn
-        let _ = DEFAULT_R;     // r passed explicitly so retargeting can plug in later
-        let amount = mint_fn(output.value_sat, self.lock_blocks, r);
+        let amount = mint_fn(output.value_sat, self.lock_blocks);
         if amount == 0 {
             return Err(MintError::AmountOverflow);
         }
@@ -315,11 +311,10 @@ pub fn verify_mint_entry<C: Verification>(
     entry: &MintEntry,
     secp: &Secp256k1<C>,
     l1: &dyn L1View,
-    r: f64,
 ) -> Result<(), MintError> {
     let credit = entry
         .witness
-        .verify(secp, l1, entry.event.l2_destination, r)?;
+        .verify(secp, l1, entry.event.l2_destination)?;
     let ev = &entry.event;
     let derived = &credit.event;
 
@@ -411,7 +406,7 @@ mod tests {
         };
 
         let credit = proof
-            .verify(&secp, &l1, l2_dest, crate::consensus::DEFAULT_R)
+            .verify(&secp, &l1, l2_dest)
             .expect("verify");
         assert!(credit.event.amount > 0);
         assert_eq!(credit.event.l1_value_sat, value_sat);
@@ -453,7 +448,7 @@ mod tests {
             signature: sig_b,
         };
         let err = proof
-            .verify(&secp, &l1, l2_dest, crate::consensus::DEFAULT_R)
+            .verify(&secp, &l1, l2_dest)
             .unwrap_err();
         assert!(matches!(err, MintError::ScriptMismatch));
     }
@@ -483,7 +478,7 @@ mod tests {
                 signature: sig,
             };
             let err = proof
-                .verify(&secp, &l1, l2_dest, crate::consensus::DEFAULT_R)
+                .verify(&secp, &l1, l2_dest)
                 .unwrap_err();
             assert!(matches!(err, MintError::BadLockBlocks { .. }), "bad={bad}");
         }
@@ -516,7 +511,7 @@ mod tests {
             signature: sig,
         };
         let err = proof
-            .verify(&secp, &l1, l2_dest, crate::consensus::DEFAULT_R)
+            .verify(&secp, &l1, l2_dest)
             .unwrap_err();
         assert!(matches!(err, MintError::LockExpired { .. }));
     }
@@ -546,7 +541,7 @@ mod tests {
             signature: sig,
         };
         let err = proof
-            .verify(&secp, &l1, l2_dest, crate::consensus::DEFAULT_R)
+            .verify(&secp, &l1, l2_dest)
             .unwrap_err();
         assert!(matches!(err, MintError::ClaimedHeightInFuture { .. }));
     }

@@ -3,16 +3,11 @@
   import * as api from "../lib/api";
   import { go } from "../lib/state.svelte";
   import type { LightBalanceOutput } from "../lib/types";
-  import {
-    mintFn,
-    RETARGET_MINT_WINDOW_ATOMS,
-    TARGET_ATOMS_PER_BLOCK,
-  } from "../lib/consensus";
+  import { mintFn, BLOCKS_PER_YEAR } from "../lib/consensus";
 
   // Stats sourced from light-verification of the wallet's own address.
   // We don't need the balance for this screen — but the same call gives
-  // us the verified head, which carries current_r / window state /
-  // total_minted_atoms.
+  // us the verified head and total_minted_atoms.
   let head = $state<LightBalanceOutput | null>(null);
   let busy = $state(false);
   let err = $state<string | null>(null);
@@ -36,25 +31,14 @@
   let calcLockBlocks = $state<number | null>(null);
 
   let calcAtoms = $derived.by(() => {
-    if (head === null) return null;
     if (calcValueSat === null || calcLockBlocks === null) return null;
     if (calcValueSat <= 0 || calcLockBlocks <= 0) return null;
-    return mintFn(calcValueSat, calcLockBlocks, head.current_r);
+    return mintFn(calcValueSat, calcLockBlocks);
   });
 
   function fmtAtoms(n: number): string {
     return n.toString().replace(/\B(?=(\d{3})+(?!\d))/g, "_");
   }
-
-  // Retarget window progress as a percentage (0..100, can exceed
-  // briefly if the threshold-crossing block was deferred).
-  let windowPct = $derived.by(() => {
-    if (head === null) return 0;
-    return Math.min(
-      100,
-      (head.current_window_atoms / RETARGET_MINT_WINDOW_ATOMS) * 100,
-    );
-  });
 </script>
 
 <header class="topbar">
@@ -106,42 +90,15 @@
     </div>
 
     <div class="card">
-      <h3>mint rate (r) &amp; retarget window</h3>
-      <dl>
-        <dt>current r</dt>
-        <dd class="mono">{head.current_r.toExponential(6)}</dd>
-        <dt>target rate</dt>
-        <dd class="mono small">
-          {fmtAtoms(TARGET_ATOMS_PER_BLOCK)} atoms / L1 block
-        </dd>
-        <dt>window progress</dt>
-        <dd>
-          <div class="progress">
-            <div class="bar" style="width: {windowPct}%"></div>
-          </div>
-          <div class="small mono">
-            {fmtAtoms(head.current_window_atoms)} /
-            {fmtAtoms(RETARGET_MINT_WINDOW_ATOMS)}
-            ({windowPct.toFixed(2)}%)
-          </div>
-        </dd>
-        <dt>window opened at</dt>
-        <dd>
-          {#if head.current_window_start_l1_height === null}
-            <span class="muted">no active window (quiet period)</span>
-          {:else}
-            L1 height {head.current_window_start_l1_height}
-          {/if}
-        </dd>
-      </dl>
-    </div>
-
-    <div class="card">
       <h3>mint calculator</h3>
       <p class="muted small">
-        Using the live r value above. The sequencer applies the same
-        formula at mint time, so the result is exact unless a
-        retarget intervenes between submit and inclusion.
+        The mint function's inflection point is at one year of locking
+        ({fmtAtoms(BLOCKS_PER_YEAR)} L1 blocks); locks shorter than
+        that are in the convex (anti-splitting) regime, and longer
+        locks are in the concave (diminishing-return) regime. The
+        rate parameter <em>r</em> is a fixed consensus constant in
+        this design — there is no retargeting, so the figure below
+        is exactly what the sequencer will credit.
       </p>
       <div class="calc">
         <div class="field">
@@ -232,19 +189,6 @@
   }
   .small {
     font-size: 0.85rem;
-  }
-  .progress {
-    width: 100%;
-    height: 8px;
-    background: var(--color-border);
-    border-radius: 999px;
-    overflow: hidden;
-    margin-bottom: var(--space-1);
-  }
-  .bar {
-    height: 100%;
-    background: var(--color-success);
-    transition: width 0.2s ease;
   }
   .calc {
     display: grid;

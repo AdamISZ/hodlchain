@@ -307,9 +307,6 @@ pub struct VerifiedHead {
     pub own_leaf: LeafKind,
     pub own_path: Vec<H256>,
     pub consumed_nullifiers: BTreeSet<String>,
-    pub current_r: f64,
-    pub current_window_atoms: u64,
-    pub current_window_start_l1_height: Option<u32>,
     /// Running tally of all atoms ever minted on the chain. Seeded
     /// from `BalanceResponse.total_minted_atoms` at cold-start
     /// bootstrap (sequencer-trusted), then accumulated locally

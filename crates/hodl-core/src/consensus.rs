@@ -1,7 +1,8 @@
 //! Network-wide consensus constants and the mint function.
 //!
-//! See `docs/issuance.tex` for the derivation of `mint_fn`, and the
-//! two-leaf taproot construction (NUMS internal key + L_spend + L_data).
+//! See `~/code/hodlchain-paper/hodlchainv2.tex` for the derivation of
+//! `mint_fn` and the two-leaf taproot construction (NUMS internal key
+//! + L_spend + L_data).
 
 use bitcoin::secp256k1::XOnlyPublicKey;
 use sha2::{Digest, Sha256};
@@ -63,69 +64,23 @@ pub const BIP341_NUMS_H_XONLY: [u8; 32] = [
     0x07, 0x8a, 0x5a, 0x0f, 0x28, 0xec, 0x96, 0xd5, 0x47, 0xbf, 0xee, 0x9a, 0xce, 0x80, 0x3a, 0xc0,
 ];
 
-/// Initial rate parameter for `mint_fn`, in units of 1 / L1-block.
+/// One year measured in Bitcoin blocks, assuming a 10-minute target
+/// block interval: `6 blocks/hour × 24 × 365 = 52_560`.
 ///
-/// **Demo / regtest value.** Set to `1.0 / 1000.0` so that `rT ≈ 1`
-/// for a 1000-block lock — short locks now produce visible f_mint
-/// output in the calculator and in the actual mints, which makes
-/// the overview tab useful during interactive sessions on a chain
-/// where blocks are mined on demand.
-///
-/// **Planned mainnet value:** `1.0 / 26_280.0`, putting the
-/// inflection point T = 1/r at ~6 months of blocks. Restore before
-/// any production launch.
-///
-/// The active value of `r` is consensus state — it lives in
-/// `LedgerState::current_r` and shifts at retarget windows.
-pub const INITIAL_R: f64 = 1.0 / 1_000.0;
+/// This is the inflection point of `mint_fn`: lock durations below
+/// this are in the convex (anti-splitting) regime; longer locks are
+/// in the concave (diminishing-return) regime.
+pub const BLOCKS_PER_YEAR: u32 = 52_560;
 
-/// Backwards-compat alias. Prefer `INITIAL_R` going forward.
-pub const DEFAULT_R: f64 = INITIAL_R;
-
-/// Target L2-token issuance rate, in atoms per L1 block.
-/// Equivalent to `M^*` in §7 of the paper. Retargeting adjusts `r`
-/// so that the *observed* rate inside each mint-paced window
-/// approaches this value.
+/// The rate parameter of `mint_fn`, in units of 1 / L1-block.
 ///
-/// **Demo / regtest value:** `1_000_000` atoms/block. Only the ratio
-/// `RETARGET_MINT_WINDOW_ATOMS / TARGET_ATOMS_PER_BLOCK` matters for
-/// chain dynamics; both have been scaled down by 50× from the
-/// planned mainnet figures so the displayed numbers stay readable.
-///
-/// **Planned mainnet value:** `50_000_000`.
-pub const TARGET_ATOMS_PER_BLOCK: u64 = 1_000_000;
-
-/// Retarget window size, in cumulative atoms minted. Equivalent to
-/// `M_w` in §7 of the paper. Once cumulative `mint_fn` output within
-/// the current window reaches this threshold, the protocol measures
-/// elapsed L1 blocks (Δ_actual) and adjusts `r`.
-///
-/// On a healthy chain minting at `TARGET_ATOMS_PER_BLOCK` exactly,
-/// the window completes in
-/// `RETARGET_MINT_WINDOW_ATOMS / TARGET_ATOMS_PER_BLOCK` L1 blocks.
-///
-/// **Demo / regtest value:** `100_000_000` atoms — with the matching
-/// `TARGET_ATOMS_PER_BLOCK = 1_000_000`, the window closes after
-/// ~100 L1 blocks of issuance, so retargets are reachable inside an
-/// interactive demo session.
-///
-/// **Planned mainnet value:** `216_000_000_000` atoms. With the
-/// mainnet `TARGET_ATOMS_PER_BLOCK = 50_000_000`, that's 4320 blocks
-/// ≈ 1 month at 10 min/block — matching the paper's "windows of
-/// months rather than weeks" recommendation, and long enough that
-/// locks-in-flight have time to respond to `r` changes.
-///
-/// Crucially this is *mint-paced*, not block-paced: during quiet
-/// periods (no mints) the loop does not advance, and `r` stays at
-/// whatever the last retarget established. See paper §7.
-pub const RETARGET_MINT_WINDOW_ATOMS: u64 = 100_000_000;
-
-/// Per-window multiplicative cap on `r` adjustment.
-/// `r_new ∈ [r_old / RETARGET_MAX_FACTOR, r_old * RETARGET_MAX_FACTOR]`.
-/// Paper §7 argues for 2 (not Bitcoin's 4), because the L2's
-/// short-range quadratic value-of-time dependence makes a tighter
-/// clamp appropriate.
-pub const RETARGET_MAX_FACTOR: f64 = 2.0;
+/// Fixed at `1 / BLOCKS_PER_YEAR`, i.e. the inflection point of the
+/// mint sigmoid is at `T = 1 year`. There is no retargeting in this
+/// design — `r` is a hard-coded consensus constant. The paper's
+/// trilemma argument (anti-gaming, immediate-mint, supply-control:
+/// pick two) motivates dropping supply-rate control in exchange for
+/// the other two; see §"Setting r" of `hodlchainv2.tex`.
+pub const R: f64 = 1.0 / (BLOCKS_PER_YEAR as f64);
 
 /// L2 native-token atomic unit per BTC sat. The mint function returns
 /// L2 atoms; we use a 1:1 mapping for the POC so that f(V,T) <= V trivially.
@@ -135,12 +90,9 @@ pub const ATOMS_PER_SAT: u64 = 1;
 /// percent). Computed as `amount * FEE_BPS / 10_000`. Paid to the
 /// sequencer's L2 fee address.
 ///
-/// **Demo / regtest value:** 1 bp = 0.01%. Anti-DoS-first, revenue-
-/// second — at this rate a transfer of 1M atoms costs 100 atoms in
-/// fee, enough to make spam economically meaningful but cheap for
-/// any real use case.
-///
-/// **Planned mainnet value:** TBD; same order of magnitude likely.
+/// 1 bp = 0.01%. Anti-DoS-first, revenue-second — at this rate a
+/// transfer of 1M atoms costs 100 atoms in fee, enough to make spam
+/// economically meaningful but cheap for any real use case.
 pub const FEE_BPS: u64 = 1;
 
 /// Floor on the per-transfer protocol fee, in atoms. Ensures that
@@ -158,18 +110,25 @@ pub const MINT_CONFIRMATIONS: u32 = 1;
 /// form encodes the value in the lower 16 bits of `nSequence`, capping it
 /// at 65535 blocks (~454 days). T = 0 disables the locktime (CSV no-op),
 /// so we require T >= 1 as well.
+///
+/// At `R = 1/BLOCKS_PER_YEAR`, this cap corresponds to `rT ≈ 1.247`,
+/// just past the inflection — meaning every practical lock duration
+/// in the POC sits within or just-past the convex regime. A
+/// production deployment that wants longer locks would need
+/// BIP118-style ANYPREVOUT or BIP119 CTV to break out of BIP112's
+/// 16-bit `nSequence` window; out of scope here.
 pub const MAX_LOCK_BLOCKS: u32 = 0xFFFF;
 
-/// f_mint(V, T) = V * (1 - (1 + rT) e^{-rT}).
+/// f_mint(V, T) = V * (1 - (1 + rT) e^{-rT}), with `r = R` fixed.
 ///
 /// `value_sat` is the BTC value locked. `lock_blocks` is T (the gap between
-/// the funding L1 block and the CLTV unlock height). `r` is the rate
-/// parameter. Returns the L2 token amount, in atoms.
-pub fn mint_fn(value_sat: u64, lock_blocks: u32, r: f64) -> u64 {
+/// the funding L1 block and the CSV unlock height). Returns the L2 token
+/// amount, in atoms.
+pub fn mint_fn(value_sat: u64, lock_blocks: u32) -> u64 {
     if lock_blocks == 0 || value_sat == 0 {
         return 0;
     }
-    let rt = r * (lock_blocks as f64);
+    let rt = R * (lock_blocks as f64);
     let ratio = 1.0 - (1.0 + rt) * libm::exp(-rt);
     // Clamp into [0, 1) defensively.
     let ratio = ratio.clamp(0.0, 1.0 - f64::EPSILON);
@@ -214,37 +173,44 @@ mod tests {
 
     #[test]
     fn mint_fn_zero_t_is_zero() {
-        assert_eq!(mint_fn(100_000_000, 0, DEFAULT_R), 0);
+        assert_eq!(mint_fn(100_000_000, 0), 0);
     }
 
     #[test]
     fn mint_fn_bounded_by_v() {
         let v = 100_000_000u64;
         // Very long lock: ratio approaches 1 but never reaches it.
-        let out = mint_fn(v, 10_000_000, DEFAULT_R);
+        let out = mint_fn(v, 10_000_000);
         assert!(out < v, "mint must be strictly less than V even at huge T");
     }
 
     #[test]
     fn mint_fn_superlinear_short() {
+        // Doubling T near the origin should more than double the reward
+        // (anti-splitting / convex regime). For demo r=1/52560, T in the
+        // single-thousands of blocks is comfortably below the inflection
+        // at T = 1 year.
         let v = 100_000_000u64;
-        let r = DEFAULT_R;
-        // Doubling T near the origin should more than double the reward.
-        let a = mint_fn(v, 1_000, r);
-        let b = mint_fn(v, 2_000, r);
-        // Allow for floor() rounding when both values are tiny.
+        let a = mint_fn(v, 1_000);
+        let b = mint_fn(v, 2_000);
         assert!(2 * a <= b + 1, "expected superlinearity for short T: 2*{} <= {}", a, b);
     }
 
     #[test]
     fn mint_fn_monotone_in_t() {
         let v = 100_000_000u64;
-        let r = DEFAULT_R;
         let mut prev = 0u64;
-        for t in [100u32, 500, 1000, 5000, 26_280, 100_000, 1_000_000] {
-            let cur = mint_fn(v, t, r);
+        for t in [100u32, 500, 1000, 5000, BLOCKS_PER_YEAR, MAX_LOCK_BLOCKS] {
+            let cur = mint_fn(v, t);
             assert!(cur >= prev, "mint_fn must be non-decreasing in T");
             prev = cur;
         }
+    }
+
+    #[test]
+    fn inflection_point_at_one_year() {
+        // sanity check: rT = 1 at T = BLOCKS_PER_YEAR
+        let rt = R * (BLOCKS_PER_YEAR as f64);
+        assert!((rt - 1.0).abs() < 1e-12);
     }
 }

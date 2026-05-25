@@ -118,17 +118,12 @@ impl Producer {
         let secp = Secp256k1::new();
         let prior_state: LedgerState = self.shared.state.lock().unwrap().clone();
         let mut state_clone: LedgerState = prior_state.clone();
-        // Snapshot the active r at block start — every mint in this
-        // block earns amounts computed at this r (so a follower,
-        // replaying with the same state, produces matching credits).
-        let r_for_block = state_clone.current_r;
 
         for entry in mints {
             let credit_result = entry.witness.verify(
                 &secp,
                 self.l1.as_ref(),
                 entry.event.l2_destination,
-                r_for_block,
             );
             let credit = match credit_result {
                 Ok(c) => c,
@@ -163,11 +158,8 @@ impl Producer {
             .unwrap_or(0);
 
         let new_height = prev_height + 1;
-        // Retarget happens AFTER txs apply, at the block-end boundary.
-        // (Algorithm unchanged from before — it's parameterised in
-        // L1 blocks, so 30s L2 cadence doesn't change the math; see
-        // docs/cadence-and-fees-plan.md §5.)
-        state_clone.end_of_block(new_height, l1_height);
+        // v2 design: no retargeting — `r` is a fixed consensus
+        // constant (`hodl_core::consensus::R`). No end-of-block hook.
 
         let txs_root = L2Block::compute_txs_root(&txs);
         let state_root = state_clone.state_root();

@@ -160,20 +160,15 @@ impl Follower {
             validate_block(&block, att)?;
         }
 
-        // Snapshot r at block start — the producer used the r in
-        // our current state before this block applied.
-        let r_for_block = self.shared.state.lock().unwrap().current_r;
-
         // Re-verify every mint witness against L1 before touching
-        // state.
+        // state. With v2 fixed-r, no per-block r snapshot is needed.
         for (i, tx) in block.txs.iter().enumerate() {
             if let L2Tx::Mint(entry) = tx {
                 let entry = entry.clone();
                 let l1 = self.l1.clone();
-                let r = r_for_block;
                 tokio::task::spawn_blocking(move || {
                     let secp = Secp256k1::verification_only();
-                    verify_mint_entry(&entry, &secp, l1.as_ref(), r)
+                    verify_mint_entry(&entry, &secp, l1.as_ref())
                 })
                 .await
                 .map_err(|e| anyhow!("join: {e}"))?
@@ -189,7 +184,6 @@ impl Follower {
                 .apply(&secp, tx)
                 .map_err(|e| anyhow!("tx in block {height} invalid: {e}"))?;
         }
-        next_state.end_of_block(height, block.header.l1_height);
 
         let computed_state_root = next_state.state_root();
         if computed_state_root != block.header.state_root {

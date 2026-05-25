@@ -1713,16 +1713,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "hodl-simulate"
-version = "0.1.1"
-dependencies = [
- "anyhow",
- "hodl-core",
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "hodl-wallet"
 version = "0.1.1"
 dependencies = [

@@ -15,8 +15,8 @@
 //!    signatures and mint witnesses verified as a side effect).
 //! 3. Calls `smt::apply_updates` to obtain the new `accounts_root`.
 //! 4. Recomputes the full `state_root` from
-//!    `(accounts_root, nullifiers_hash, retarget scalars)` and checks
-//!    it against `block.header.state_root`.
+//!    `(accounts_root, nullifiers_hash, sequencer_fee_address)` and
+//!    checks it against `block.header.state_root`.
 //!
 //! Post-states aren't carried in the witness — they're derivable from
 //! the block body, and forcing the wallet to derive them keeps the

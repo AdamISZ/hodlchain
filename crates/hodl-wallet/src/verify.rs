@@ -178,9 +178,6 @@ pub async fn bootstrap(
         own_leaf: bal.proof.leaf,
         own_path: bal.proof.siblings,
         consumed_nullifiers,
-        current_r: bal.state_components.current_r,
-        current_window_atoms: bal.state_components.current_window_atoms,
-        current_window_start_l1_height: bal.state_components.current_window_start_l1_height,
         total_minted_atoms: bal.total_minted_atoms,
         sequencer_fee_address: bal.state_components.sequencer_fee_address,
     })
@@ -335,7 +332,7 @@ async fn verify_one_l2_block<C: bitcoin::secp256k1::Verification>(
     let l1_view = prefetch_l1_for_block(esplora, &block, l1_tip).await?;
     for (i, tx) in block.txs.iter().enumerate() {
         if let L2Tx::Mint(entry) = tx {
-            verify_mint_entry(entry, secp, &l1_view, head.current_r).map_err(|e| {
+            verify_mint_entry(entry, secp, &l1_view).map_err(|e| {
                 anyhow!("mint entry #{i} in block {height} invalid: {e}")
             })?;
         }
@@ -351,9 +348,6 @@ async fn verify_one_l2_block<C: bitcoin::secp256k1::Verification>(
         }
     }
     sparse_ls.consumed_nullifiers = head.consumed_nullifiers.clone();
-    sparse_ls.current_r = head.current_r;
-    sparse_ls.current_window_atoms = head.current_window_atoms;
-    sparse_ls.current_window_start_l1_height = head.current_window_start_l1_height;
     sparse_ls.total_minted_atoms = head.total_minted_atoms;
     sparse_ls.sequencer_fee_address = head.sequencer_fee_address;
 
@@ -362,7 +356,6 @@ async fn verify_one_l2_block<C: bitcoin::secp256k1::Verification>(
             anyhow!("tx #{i} in block {height} failed apply on sparse state: {e}")
         })?;
     }
-    sparse_ls.end_of_block(height, block.header.l1_height);
 
     // ---- 4. Sparse SMT update for the new accounts_root ----
     let updates: Vec<smt::Update> = witness
@@ -397,9 +390,6 @@ async fn verify_one_l2_block<C: bitcoin::secp256k1::Verification>(
     let new_components = StateComponents {
         accounts_root: new_accounts_root,
         nullifiers_hash: sparse_ls.nullifiers_hash(),
-        current_r: sparse_ls.current_r,
-        current_window_atoms: sparse_ls.current_window_atoms,
-        current_window_start_l1_height: sparse_ls.current_window_start_l1_height,
         sequencer_fee_address: sparse_ls.sequencer_fee_address,
     };
     let new_state_root = new_components.state_root();
@@ -441,9 +431,6 @@ async fn verify_one_l2_block<C: bitcoin::secp256k1::Verification>(
         own_leaf: observer_post.leaf,
         own_path: observer_post.siblings,
         consumed_nullifiers: sparse_ls.consumed_nullifiers,
-        current_r: sparse_ls.current_r,
-        current_window_atoms: sparse_ls.current_window_atoms,
-        current_window_start_l1_height: sparse_ls.current_window_start_l1_height,
         total_minted_atoms: sparse_ls.total_minted_atoms,
         sequencer_fee_address: sparse_ls.sequencer_fee_address,
     })

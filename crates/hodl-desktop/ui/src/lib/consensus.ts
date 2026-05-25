@@ -1,42 +1,40 @@
 // TypeScript mirror of hodl-core::consensus. Kept tiny on purpose —
-// only the bits the UI needs (mint formula + retarget window size).
+// only the bits the UI needs (mint formula + fixed r).
 // MUST stay in sync with crates/hodl-core/src/consensus.rs.
 
 /**
- * f_mint(V, T, r) = V * (1 - (1 + rT) * e^{-rT}).
+ * One year in Bitcoin blocks at the 10-minute target interval.
+ * `6 blocks/hour × 24 × 365 = 52_560`.
+ */
+export const BLOCKS_PER_YEAR = 52_560;
+
+/**
+ * The fixed mint-function rate parameter, in 1 / L1-block. Inflection
+ * of `mint_fn` sits at `T = 1 year`. No retargeting in this design.
+ */
+export const R = 1 / BLOCKS_PER_YEAR;
+
+/**
+ * f_mint(V, T) = V * (1 - (1 + rT) * e^{-rT}), with r = R fixed.
  *
  * `valueSat` is the BTC value locked (sat). `lockBlocks` is T (the gap
- * between the funding L1 block and the CSV unlock). `r` is the live
- * rate parameter. Returns the L2 atom amount.
+ * between the funding L1 block and the CSV unlock). Returns the L2
+ * atom amount.
  *
  * Matches the Rust implementation: clamps the ratio into [0, 1) and
  * floors the result so the JS preview agrees with what the sequencer
  * will credit. (ATOMS_PER_SAT = 1 for the POC so the multiplication
  * is dropped here.)
  */
-export function mintFn(valueSat: number, lockBlocks: number, r: number): number {
+export function mintFn(valueSat: number, lockBlocks: number): number {
   if (lockBlocks === 0 || valueSat === 0) return 0;
-  const rt = r * lockBlocks;
+  const rt = R * lockBlocks;
   let ratio = 1 - (1 + rt) * Math.exp(-rt);
   // Defensive clamp — matches the Rust `clamp(0.0, 1.0 - f64::EPSILON)`.
   if (ratio < 0) ratio = 0;
   if (ratio > 1 - Number.EPSILON) ratio = 1 - Number.EPSILON;
   return Math.floor(valueSat * ratio);
 }
-
-/**
- * Cumulative atoms required to close one retarget window (paper §7 M_w).
- *
- * Demo / regtest value. Planned mainnet value: 216_000_000_000.
- */
-export const RETARGET_MINT_WINDOW_ATOMS = 100_000_000;
-
-/**
- * Target atom issuance per L1 block (paper §7 M*).
- *
- * Demo / regtest value. Planned mainnet value: 50_000_000.
- */
-export const TARGET_ATOMS_PER_BLOCK = 1_000_000;
 
 /** Per-transfer protocol fee in basis points. */
 export const FEE_BPS = 1;

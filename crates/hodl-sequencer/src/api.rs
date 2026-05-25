@@ -145,14 +145,13 @@ async fn submit_mint(
     Json(req): Json<SubmitMintRequest>,
 ) -> Result<Json<SubmitMintResponse>, ApiError> {
     let l1 = app.l1.clone();
-    let r = app.shared.state.lock().unwrap().current_r;
     let dest = req.l2_destination;
     let witness = req.proof;
     let witness_for_verify = witness.clone();
 
     let credit_result = tokio::task::spawn_blocking(move || {
         let secp = Secp256k1::verification_only();
-        witness_for_verify.verify(&secp, l1.as_ref(), dest, r)
+        witness_for_verify.verify(&secp, l1.as_ref(), dest)
     })
     .await
     .map_err(|e| anyhow::anyhow!("join: {e}"))?;
