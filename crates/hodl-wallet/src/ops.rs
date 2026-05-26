@@ -37,7 +37,7 @@ use crate::reclaim;
 use crate::verify::{self, ObservedTxKind, TxEvent};
 use crate::wallet::{
     new_tx_id, now_ts, parse_outpoint, MintRecord, NetworkName, TxKind, TxRecord, TxStatus,
-    WalletFile,
+    WalletFile, REORG_FINALITY_DEPTH,
 };
 
 /// Apply a batch of `walk_forward` events to the wallet's tx history.
@@ -163,6 +163,90 @@ fn project_events(wf: &mut WalletFile, events: &[TxEvent]) {
             }
         }
     }
+}
+
+/// Late-stage status refresh: poll esplora for unconfirmed L1
+/// records, then walk every non-Finalized record and flip to
+/// `Finalized` if its L1 height is now `REORG_FINALITY_DEPTH` or
+/// more deep in the chain.
+///
+/// Reorg recovery (the inverse: demoting `InBlock` back to
+/// `L1Mempool` / `Soft` when an L1 reorg invalidates the containing
+/// block) is **not** handled here; that requires per-record proof
+/// that the previously-observed inclusion has been undone, which
+/// the current Esplora-only data path doesn't always provide
+/// cheaply. Leaving it as a deliberate gap until the use case
+/// justifies the complexity.
+///
+/// Returns `Ok(true)` if any record changed status (so the caller
+/// knows to persist), `Ok(false)` if nothing moved.
+async fn finalize_and_refresh(
+    wf: &mut WalletFile,
+    esplora: &EsploraClient,
+    l1_tip: u32,
+) -> Result<bool> {
+    let mut changed = false;
+
+    // ---- Pass 1: promote L1Mempool records to InBlock by polling
+    //              esplora for their txid.
+    //
+    // We collect indices first to avoid double-borrowing `wf` (mutable
+    // iteration while awaiting). Cheap; the list is bounded by the
+    // number of in-flight L1 txs, which is small in practice.
+    let mut promotions: Vec<(usize, u32)> = Vec::new();
+    for (i, t) in wf.transactions.iter().enumerate() {
+        if matches!(t.status, TxStatus::L1Mempool { .. }) {
+            if let Some(txid_hex) = &t.l1_txid {
+                let txid: Txid = match txid_hex.parse() {
+                    Ok(x) => x,
+                    Err(_) => continue,
+                };
+                match esplora.get_tx(&txid).await {
+                    Ok(info) => {
+                        if let Some(h) = info.status.block_height {
+                            promotions.push((i, h));
+                        }
+                    }
+                    Err(_) => {
+                        // 404 / network error: leave as L1Mempool.
+                        // We could attempt to differentiate "tx not
+                        // found" from transport error here but the
+                        // benign action is the same — try again on
+                        // the next refresh.
+                    }
+                }
+            }
+        }
+    }
+    for (i, h) in promotions {
+        wf.transactions[i].status = TxStatus::InBlock {
+            l2_height: 0, // pure-L1 record
+            l1_height: h,
+            included_ts: now_ts(),
+        };
+        changed = true;
+    }
+
+    // ---- Pass 2: flip InBlock records to Finalized when deep enough.
+    //
+    // `tip - l1_height >= REORG_FINALITY_DEPTH` is the gate. We use
+    // saturating_sub so a record whose l1_height somehow exceeds the
+    // tip (shouldn't happen, but cheap defence) falls through as
+    // depth=0 → stays InBlock.
+    for t in wf.transactions.iter_mut() {
+        if let TxStatus::InBlock { l2_height, l1_height, .. } = t.status {
+            let depth = l1_tip.saturating_sub(l1_height);
+            if depth >= REORG_FINALITY_DEPTH {
+                t.status = TxStatus::Finalized {
+                    l2_height,
+                    l1_height,
+                };
+                changed = true;
+            }
+        }
+    }
+
+    Ok(changed)
 }
 
 // ---------- Keygen ----------
@@ -970,6 +1054,17 @@ pub async fn light_balance(wallet_path: &Path, input: LightBalanceInput) -> Resu
     if !events.is_empty() {
         project_events(&mut wf, &events);
     }
+
+    // Late-stage status refresh: promote L1Mempool → InBlock for
+    // any L1 records that have since confirmed, and flip InBlock →
+    // Finalized for any record whose L1 height is now buried past
+    // REORG_FINALITY_DEPTH. Cheap one-shot pass; the L1 tip we use
+    // is the actual chain tip from Esplora (not head.l1_height,
+    // which trails by up to one attestation cadence).
+    let l1_tip = esplora.tip_height().await.unwrap_or(head.l1_height);
+    finalize_and_refresh(&mut wf, &esplora, l1_tip)
+        .await
+        .context("late-stage status refresh")?;
 
     // One-time top-up for wallets that persisted a `VerifiedHead`
     // before `total_minted_atoms` existed: the field defaults to 0

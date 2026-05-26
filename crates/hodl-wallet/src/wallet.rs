@@ -55,6 +55,20 @@ pub const DEFAULT_WALLET_PATH: &str = "./hodl-wallet.json";
 /// derivation paths via the `'` suffix in the string form.
 pub const HODLCHAIN_PURPOSE: u32 = 0x484F444C;
 
+/// L1 confirmation depth at which the wallet considers a record
+/// `Finalized`. Mirror of the same-named constant in
+/// `hodl_sequencer::producer` — the sequencer uses it to decide when
+/// to stop tracking pending L1 attestations; the wallet uses it for
+/// the analogous "no more reorg concern" judgement on TxRecords.
+///
+/// Keep these in sync. There's no automated cross-crate check today
+/// because the sequencer's value is a private `const`; mismatching
+/// them would mean the wallet shows finalisation earlier or later
+/// than the sequencer trusts the same depth, which is cosmetic but
+/// confusing. Promotion to a shared `hodl-core` constant would
+/// remove the foot-gun and is a sensible follow-up.
+pub const REORG_FINALITY_DEPTH: u32 = 2;
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WalletFile {
     pub network: NetworkName,
