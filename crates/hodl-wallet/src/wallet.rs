@@ -82,6 +82,17 @@ pub struct WalletFile {
     pub mints: Vec<MintRecord>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub verified_head: Option<VerifiedHead>,
+    /// Append-only transaction history. Stored chronologically (oldest
+    /// first); UIs reverse for display. Backed by a separate vec from
+    /// `mints` because MintRecord is the operational source-of-truth
+    /// for the reclaim flow and TxRecord is purely a presentation/
+    /// observability layer — they cross-reference via
+    /// `MintRecord.bip32_index` and `TxRecord.bip32_index`.
+    ///
+    /// `#[serde(default)]` so wallets created before this field load
+    /// with an empty history.
+    #[serde(default)]
+    pub transactions: Vec<TxRecord>,
 }
 
 pub fn network_from_str(s: &str) -> Result<NetworkName> {
@@ -142,6 +153,165 @@ pub fn parse_outpoint(s: &str) -> Result<OutPoint> {
     let txid: bitcoin::Txid = txid.parse().context("invalid txid")?;
     let vout: u32 = vout.parse().context("invalid vout")?;
     Ok(OutPoint { txid, vout })
+}
+
+// ---------- Transaction history ----------
+//
+// User-facing event log. Captures L1 deposits, L2 mint messages,
+// outgoing/incoming L2 transfers, and L1 reclaim broadcasts. See
+// the planning notes (this commit's PR / docs) for the full design.
+
+/// The kind of event recorded in `TxRecord`.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TxKind {
+    /// Wallet broadcast BTC to a mint deposit address (L1).
+    L1Deposit,
+    /// Wallet broadcast a reclaim transaction spending a CSV-matured
+    /// mint UTXO back to a user destination (L1).
+    L1Reclaim,
+    /// Wallet submitted a mint message to the sequencer (L2). The
+    /// downstream effect — atoms credited to `l2_destination` —
+    /// becomes visible once the message lands in an L2 block.
+    L2MintApply,
+    /// Wallet submitted an outbound transfer (L2).
+    L2TransferSent,
+    /// An inbound transfer to this wallet's L2 address was observed
+    /// while walking blocks. Born at `InBlock` status (we never
+    /// see it as `Pending` because we didn't initiate it).
+    L2TransferReceived,
+}
+
+/// Lifecycle state of a `TxRecord`.
+///
+/// The pre-block state intentionally splits L1 vs L2 because the two
+/// have materially different reliability profiles:
+///
+///   - `Soft` (L2 only): the sequencer has accepted the message and
+///     applied it to its in-memory state. The soft balance reflects
+///     it immediately. Barring sequencer crash or an L1 reorg of the
+///     underlying deposit (for mints), it will land in the next L2
+///     block (~30s under current cadence).
+///   - `L1Mempool` (L1 only): broadcast to Bitcoin's p2p network.
+///     No commitment from anyone — may be evicted by fee policy,
+///     RBF-replaced, or never mined.
+///
+/// Records transition forward as new evidence arrives and terminally
+/// land in `Finalized` or `Failed`. Reorgs can move `InBlock` back
+/// to `Soft` / `L1Mempool` during the `REORG_FINALITY_DEPTH` window;
+/// nothing ever leaves `Finalized`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum TxStatus {
+    /// L2 only — sequencer has accepted, soft-credited in its state.
+    /// Used by `L2MintApply` and `L2TransferSent`.
+    Soft {
+        /// Unix-seconds when the sequencer accepted the message.
+        since_ts: u64,
+    },
+    /// L1 only — broadcast to Bitcoin mempool, not yet confirmed.
+    /// Used by `L1Deposit` and `L1Reclaim`.
+    L1Mempool {
+        /// Unix-seconds when the broadcast was made.
+        since_ts: u64,
+    },
+    /// Observed in a block. For L2 records this means an L2 block
+    /// (not necessarily L1-anchored yet); for L1 records this
+    /// means 1+ L1 confirmations.
+    InBlock {
+        /// L2 block height the tx landed in. `0` for pure-L1 records
+        /// (deposit / reclaim confirmations).
+        l2_height: u32,
+        /// L1 height at which the inclusion (or for L1 records, the
+        /// confirmation) was observed.
+        l1_height: u32,
+        /// Unix-seconds when the transition was observed locally.
+        included_ts: u64,
+    },
+    /// For L2 records: containing L2 block is L1-anchored past
+    /// `REORG_FINALITY_DEPTH`. For L1 records: confirmation depth
+    /// past the same threshold.
+    Finalized {
+        l2_height: u32,
+        l1_height: u32,
+    },
+    /// Sequencer rejected, broadcast failed, witness re-verify
+    /// failed during walk-forward, etc.
+    Failed {
+        reason: String,
+        ts: u64,
+    },
+}
+
+/// One event in the wallet's transaction history.
+///
+/// This struct is presentation-shaped, not consensus-shaped — multiple
+/// `TxRecord`s may describe a single logical operation (e.g. an
+/// `L1Deposit` plus an `L2MintApply` for one mint cycle), linked via
+/// `bip32_index`. The full state of a CSV-locked mint UTXO still
+/// lives in `MintRecord`; TxRecord is for observability only.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TxRecord {
+    /// Stable local identifier. 16 hex chars from a random u64;
+    /// uniqueness within this wallet file is the only requirement.
+    pub id: String,
+    pub kind: TxKind,
+    /// Unix-seconds when this record was first created (submission
+    /// time for outbound, discovery time for inbound).
+    pub created_ts: u64,
+    /// Amount in the natural unit: sat for L1 records, atoms for L2.
+    pub amount: u64,
+    /// Per-transfer protocol fee in atoms. Populated for
+    /// `L2TransferSent` only.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub fee_atoms: Option<u64>,
+    /// L1 miner fee in sat. Populated for `L1Reclaim` only.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub fee_sat: Option<u64>,
+    /// The "other side" of the tx:
+    ///   - L1Deposit: the bech32m mint address (always our own).
+    ///   - L1Reclaim: the destination bech32 address.
+    ///   - L2MintApply: our own L2 address (hex xonly pubkey).
+    ///   - L2TransferSent: the recipient (hex xonly).
+    ///   - L2TransferReceived: the sender (hex xonly).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub counterparty: Option<String>,
+    pub status: TxStatus,
+    /// L1 txid (hex) for `L1Deposit` and `L1Reclaim`.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub l1_txid: Option<String>,
+    /// Hex-encoded `body.sighash()` for `L2TransferSent` (so the
+    /// walk-forward path can match the in-block transfer against
+    /// this record), or the nullifier_hex for `L2MintApply`.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub l2_sighash: Option<String>,
+    /// BIP32 index linking back to a `MintRecord` for L1Deposit /
+    /// L1Reclaim / L2MintApply records.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub bip32_index: Option<u32>,
+    /// User-supplied free-form note. Reserved for a future UX
+    /// feature; always `None` today.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub note: Option<String>,
+}
+
+/// Generate a 16-hex-char random id for a `TxRecord`. Uses
+/// `rand::thread_rng()` via the bitcoin crate's re-export.
+pub fn new_tx_id() -> String {
+    use bitcoin::secp256k1::rand::RngCore;
+    let mut buf = [0u8; 8];
+    bitcoin::secp256k1::rand::thread_rng().fill_bytes(&mut buf);
+    format!("{:016x}", u64::from_be_bytes(buf))
+}
+
+/// Convenience: current unix-seconds, saturating to 0 if the clock
+/// is set before 1970 (unlikely outside of integration tests with
+/// frozen clocks).
+pub fn now_ts() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 impl WalletFile {
@@ -364,6 +534,7 @@ mod tests {
             next_mint_index: 0,
             mints: vec![],
             verified_head: None,
+            transactions: vec![],
         }
     }
 
@@ -417,5 +588,96 @@ mod tests {
         let (kp, idx) = wf.allocate_mint_keypair(&secp).unwrap();
         let again = wf.mint_keypair(&secp, idx).unwrap();
         assert_eq!(kp.secret_key(), again.secret_key());
+    }
+
+    // ---------- TxRecord / TxStatus / TxKind ----------
+
+    #[test]
+    fn tx_id_is_16_hex_chars_and_unique() {
+        let a = new_tx_id();
+        let b = new_tx_id();
+        assert_eq!(a.len(), 16);
+        assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
+        // Birthday paradox at 64 bits: two consecutive calls colliding
+        // is ~2^-64. Probabilistic but fine.
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn tx_record_roundtrips_through_serde_for_every_status_variant() {
+        let cases = [
+            TxStatus::Soft { since_ts: 1_700_000_000 },
+            TxStatus::L1Mempool { since_ts: 1_700_000_000 },
+            TxStatus::InBlock {
+                l2_height: 42,
+                l1_height: 1234,
+                included_ts: 1_700_000_500,
+            },
+            TxStatus::Finalized { l2_height: 42, l1_height: 1234 },
+            TxStatus::Failed {
+                reason: "non-BIP68-final".into(),
+                ts: 1_700_000_600,
+            },
+        ];
+        for status in cases {
+            let rec = TxRecord {
+                id: new_tx_id(),
+                kind: TxKind::L2TransferSent,
+                created_ts: 1_700_000_000,
+                amount: 12_345,
+                fee_atoms: Some(100),
+                fee_sat: None,
+                counterparty: Some("ab".repeat(32)),
+                status,
+                l1_txid: None,
+                l2_sighash: Some("cd".repeat(32)),
+                bip32_index: None,
+                note: None,
+            };
+            let json = serde_json::to_string(&rec).unwrap();
+            let back: TxRecord = serde_json::from_str(&json).unwrap();
+            // Spot-check rather than full structural equality (would
+            // need PartialEq on the enum; not worth pulling in for
+            // a serde sanity check).
+            assert_eq!(back.id, rec.id);
+            assert_eq!(back.kind, rec.kind);
+            assert_eq!(back.amount, rec.amount);
+        }
+    }
+
+    #[test]
+    fn tx_kind_serialises_to_snake_case() {
+        let json = serde_json::to_string(&TxKind::L2TransferReceived).unwrap();
+        assert_eq!(json, "\"l2_transfer_received\"");
+    }
+
+    #[test]
+    fn tx_status_serialises_with_internal_tag() {
+        let s = TxStatus::Soft { since_ts: 7 };
+        let json = serde_json::to_string(&s).unwrap();
+        // serde tag = "kind" makes the discriminator explicit, which
+        // is what the UI keys on for status pills.
+        assert!(json.contains("\"kind\":\"soft\""));
+        assert!(json.contains("\"since_ts\":7"));
+
+        let s = TxStatus::L1Mempool { since_ts: 9 };
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(json.contains("\"kind\":\"l1_mempool\""));
+    }
+
+    #[test]
+    fn wallet_file_loads_with_empty_transactions_when_field_missing() {
+        // Old wallets serialised before `transactions` existed must
+        // still load. The default attribute is what makes this work.
+        let old_json = r#"{
+            "network": "regtest",
+            "mnemonic": "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+            "sequencer_url": "http://127.0.0.1:8081",
+            "esplora_url": "http://127.0.0.1:8080",
+            "next_mint_index": 0,
+            "mints": []
+        }"#;
+        let wf: WalletFile = serde_json::from_str(old_json).unwrap();
+        assert!(wf.transactions.is_empty());
     }
 }

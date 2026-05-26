@@ -98,6 +98,7 @@ pub fn keygen(wallet_path: &Path, input: KeygenInput) -> Result<KeygenOutput> {
         next_mint_index: 0,
         mints: Vec::new(),
         verified_head: None,
+        transactions: Vec::new(),
     };
     wf.save(wallet_path)?;
     let l2_address = wf.l2_identity_xonly(&secp)?;
