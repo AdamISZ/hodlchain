@@ -10,7 +10,7 @@ is destroyed.
 > **Status**: research POC. Single-sequencer L2 on Bitcoin regtest /
 > signet. Not for mainnet, not audited, not stable.
 
-![hodlchain desktop wallet — blockchain overview tab showing chain head, total minted supply, current r, and retarget-window progress](docs/overviewtab.png)
+![hodlchain desktop wallet — dashboard tab showing the soft balance with its L1-confirmed footnote, the verified-head panel (L2 + L1 heights, nonce, state_root, address with copy/QR buttons), and the navigation row (mint / send / reclaim / overview / history)](docs/dashboardtab.png)
 
 ## Quick start
 
@@ -27,12 +27,13 @@ Both Linux and macOS are covered in each doc.
 
 | Crate                  | What it is                                                       |
 |------------------------|------------------------------------------------------------------|
-| `crates/hodl-core`     | Library: consensus types, mint function, retargeting, SMT,       |
-|                        | block + tx + proof types, OP_RETURN attestation codec,           |
-|                        | Esplora wire types, shared RPC DTOs.                             |
-| `crates/hodl-sequencer`| Single-sequencer L2 producer. Builds one L2 block per L1 block,  |
-|                        | posts a chained OP_RETURN attestation per block, serves an HTTP  |
-|                        | API for tx submission and queries.                               |
+| `crates/hodl-core`     | Library: consensus types, mint function with a fixed rate        |
+|                        | parameter, SMT, block + tx + proof types, OP_RETURN              |
+|                        | attestation codec, Esplora wire types, shared RPC DTOs.          |
+| `crates/hodl-sequencer`| Single-sequencer L2 producer. Builds L2 blocks on a 30s          |
+|                        | timer (faster on regtest), batches L1 attestations so each       |
+|                        | attestation pins a range of L2 blocks, serves an HTTP API for    |
+|                        | tx submission and queries.                                       |
 | `crates/hodl-node`     | Passive L2 validator. Follows the L1 attestation chain via       |
 |                        | bitcoind, replays L2 blocks, re-verifies every mint witness      |
 |                        | against L1. Exposes a slim Esplora-compatible HTTP subset so     |
@@ -84,14 +85,15 @@ subcommand list (`mine`, `fund`, `stop`, `status`, `reset`, `logs`).
 
 If you want to follow the protocol from the bottom up:
 
-1. **`crates/hodl-core/src/consensus.rs`** — `mint_fn`, retargeting
-   constants, BIP341 NUMS H, chain_id tag.
+1. **`crates/hodl-core/src/consensus.rs`** — `mint_fn`, the fixed
+   rate parameter `R = 1 / (1 year in blocks)`, BIP341 NUMS H,
+   chain_id tag.
 2. **`crates/hodl-core/src/l1.rs`** — the canonical mint-UTXO Taproot
    construction (NUMS internal key + 2-leaf tap tree: CSV spend leaf
    and `OP_RETURN <D>` namespace-binding data leaf).
 3. **`crates/hodl-core/src/proof.rs`** — `MintProof` trait, `MintProofEnvelope` enum (v0 = transparent outpoint proof; future
    variants slot in here), `verify_mint_entry` glue.
-4. **`crates/hodl-core/src/state.rs`** — `LedgerState`, retargeting,
+4. **`crates/hodl-core/src/state.rs`** — `LedgerState`,
    `state_root` computation via `StateComponents`.
 5. **`crates/hodl-core/src/smt.rs`** — 256-level sparse Merkle tree
    over accounts, inclusion/non-inclusion proofs.

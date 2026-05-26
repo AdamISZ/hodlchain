@@ -203,11 +203,29 @@ actually try the mint loop:
    dashboard the headline balance updates immediately (it's the
    soft value); the small "L1-confirmed" subsidiary line below
    it lags slightly until the attestation lands.
-6. The **overview** tab has a live snapshot of the chain's `r`
-   and retarget window, plus a mint calculator you can use to
-   predict the result of future deposits:
+6. The **history** tab shows every event the wallet has produced
+   or observed — L1 deposits, L2 mint messages, sends, receives,
+   and L1 reclaims — chronologically newest-first, with a status
+   pill per row tracking the lifecycle stage (`soft`,
+   `in mempool`, `in block`, `finalized`, `failed`). Click any
+   row to expand it for the full counterparty, txid / sighash,
+   block heights, fees, and the underlying status detail. Filters
+   on `kind` and `status` are at the top:
 
-   ![blockchain overview tab: chain head, total minted supply, current r and retarget-window progress, mint calculator](overviewtab.png)
+   ![transaction history tab: chronological row-per-event table with status pills, kind/status filters above, and an expanded row showing full counterparty + L1 txid + status detail](historytab.png)
+
+   The refresh button drives a light-verification walk before
+   re-reading, so status transitions (`soft` → `in block` →
+   `finalized`, `in mempool` → `in block` → `finalized`) flip on
+   the click that picks up the new L1 tip — no need to mine more
+   blocks or close-and-reopen the tab.
+
+7. There's also a separate **overview** tab with a deposit-yield
+   calculator: enter a sat amount and lock duration, see how many
+   atoms the chain will mint. The output is exact — the rate
+   parameter is fixed in consensus, so the value the calculator
+   shows is precisely what the sequencer will credit. No screenshot
+   here; the layout is straightforward.
 
 For transfers, the **send** tab shows a live "amount / + fee /
 = total" preview as you type. The chain charges a flat 0.01%
