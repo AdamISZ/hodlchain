@@ -42,6 +42,50 @@ use crate::api::ApiClient;
 use crate::esplora::{walk_attestation_chain, EsploraClient};
 use crate::wallet::VerifiedHead;
 
+/// A wallet-touching event observed while replaying an L2 block.
+///
+/// Emitted by `walk_forward`; consumed by `ops::light_balance` to
+/// update the transaction-history side-cache on the wallet file.
+/// `walk_forward` itself stays purely concerned with state-root
+/// verification — no wallet-file mutation happens here.
+#[derive(Clone, Debug)]
+pub struct TxEvent {
+    pub l2_height: u32,
+    pub l1_height: u32,
+    /// L2 block header timestamp (unix-seconds). Used as `created_ts`
+    /// for backfilled records so cold-start restores produce a
+    /// realistic-looking history rather than a stack at "now".
+    pub block_ts: u64,
+    pub kind: ObservedTxKind,
+}
+
+#[derive(Clone, Debug)]
+pub enum ObservedTxKind {
+    /// A transfer landed with `to == own_address` (inbound).
+    TransferIn {
+        from: L2Address,
+        amount: u64,
+        body_sighash_hex: String,
+    },
+    /// A transfer landed with `from == own_address` (outbound). Used
+    /// to flip a previously-submitted Soft record to InBlock, or to
+    /// reconstruct the record on a cold-start where no Soft record
+    /// existed.
+    TransferOut {
+        to: L2Address,
+        amount: u64,
+        body_sighash_hex: String,
+    },
+    /// A mint event credited our address. Could be one we initiated
+    /// (match by nullifier_hex against any pending Soft L2MintApply
+    /// and flip to InBlock) or one we received from elsewhere
+    /// (no matching record → create a new L2MintApply).
+    MintIn {
+        amount: u64,
+        nullifier_hex: String,
+    },
+}
+
 /// L1View backed by a pre-fetched map of outpoint → L1Output.
 struct BatchL1View {
     outputs: HashMap<OutPoint, L1Output>,
@@ -197,10 +241,10 @@ pub async fn walk_forward(
     head: VerifiedHead,
     api: &ApiClient,
     esplora: &EsploraClient,
-) -> Result<(VerifiedHead, usize)> {
+) -> Result<(VerifiedHead, usize, Vec<TxEvent>)> {
     let chain = walk_attestation_chain(esplora, head.anchor_outpoint).await?;
     if chain.is_empty() {
-        return Ok((head, 0));
+        return Ok((head, 0, Vec::new()));
     }
     let tip = esplora
         .tip_height()
@@ -209,6 +253,7 @@ pub async fn walk_forward(
     let secp = Secp256k1::verification_only();
     let mut head = head;
     let mut count = 0;
+    let mut events: Vec<TxEvent> = Vec::new();
     for step in &chain {
         let target = step.attestation.height;
         if target <= head.l2_height {
@@ -224,14 +269,15 @@ pub async fn walk_forward(
             // are not L1-pinned. Only the final block (h == target)
             // is checked against the attestation's hash + root.
             let end_att = if h == target { Some(&step.attestation) } else { None };
-            head = verify_one_l2_block(head, h, end_att, tip, api, esplora, &secp).await?;
+            head =
+                verify_one_l2_block(head, h, end_att, tip, api, esplora, &secp, &mut events).await?;
             count += 1;
         }
         // Advance the anchor outpoint to this attestation's spend.
         head.anchor_outpoint = step.new_anchor;
         head.l1_height = step.l1_height;
     }
-    Ok((head, count))
+    Ok((head, count, events))
 }
 
 /// Verify one L2 block against the current verified head.
@@ -251,6 +297,7 @@ async fn verify_one_l2_block<C: bitcoin::secp256k1::Verification>(
     api: &ApiClient,
     esplora: &EsploraClient,
     secp: &Secp256k1<C>,
+    events: &mut Vec<TxEvent>,
 ) -> Result<VerifiedHead> {
     let block = api
         .get_block(height)
@@ -355,6 +402,57 @@ async fn verify_one_l2_block<C: bitcoin::secp256k1::Verification>(
         sparse_ls.apply(secp, tx).map_err(|e| {
             anyhow!("tx #{i} in block {height} failed apply on sparse state: {e}")
         })?;
+    }
+
+    // ---- 3b. Emit wallet-touching events for the tx-history side cache ----
+    //
+    // This is a pure projection — every event is something `apply`
+    // already validated, so we just inspect tx-by-tx and push records
+    // when own_address is the from/to/destination. Cheap, no extra
+    // verification work.
+    for tx in &block.txs {
+        match tx {
+            L2Tx::Mint(entry) => {
+                if entry.event.l2_destination == head.own_address {
+                    events.push(TxEvent {
+                        l2_height: height,
+                        l1_height: block.header.l1_height,
+                        block_ts: block.header.timestamp,
+                        kind: ObservedTxKind::MintIn {
+                            amount: entry.event.amount,
+                            nullifier_hex: entry.event.nullifier_hex.clone(),
+                        },
+                    });
+                }
+            }
+            L2Tx::Transfer(t) => {
+                let sighash_hex = hex::encode(t.body.sighash().0);
+                if t.body.to == head.own_address {
+                    events.push(TxEvent {
+                        l2_height: height,
+                        l1_height: block.header.l1_height,
+                        block_ts: block.header.timestamp,
+                        kind: ObservedTxKind::TransferIn {
+                            from: t.body.from,
+                            amount: t.body.amount,
+                            body_sighash_hex: sighash_hex.clone(),
+                        },
+                    });
+                }
+                if t.body.from == head.own_address {
+                    events.push(TxEvent {
+                        l2_height: height,
+                        l1_height: block.header.l1_height,
+                        block_ts: block.header.timestamp,
+                        kind: ObservedTxKind::TransferOut {
+                            to: t.body.to,
+                            amount: t.body.amount,
+                            body_sighash_hex: sighash_hex,
+                        },
+                    });
+                }
+            }
+        }
     }
 
     // ---- 4. Sparse SMT update for the new accounts_root ----

@@ -34,11 +34,136 @@ use std::str::FromStr;
 use crate::api::ApiClient;
 use crate::esplora::{self, EsploraClient};
 use crate::reclaim;
-use crate::verify;
+use crate::verify::{self, ObservedTxKind, TxEvent};
 use crate::wallet::{
     new_tx_id, now_ts, parse_outpoint, MintRecord, NetworkName, TxKind, TxRecord, TxStatus,
     WalletFile,
 };
+
+/// Apply a batch of `walk_forward` events to the wallet's tx history.
+/// Matches existing `Soft` records by sighash / nullifier and flips
+/// them to `InBlock`; emits fresh records for events with no match.
+///
+/// Idempotent: re-running on the same `events` won't duplicate
+/// records (each event's unique key — sighash for transfers,
+/// nullifier for mints — is checked against existing records before
+/// inserting a new one).
+fn project_events(wf: &mut WalletFile, events: &[TxEvent]) {
+    for ev in events {
+        let included_ts = if ev.block_ts != 0 { ev.block_ts } else { now_ts() };
+        match &ev.kind {
+            ObservedTxKind::TransferIn { from, amount, body_sighash_hex } => {
+                // Dedupe by sighash. (Two TransferIns with the same
+                // sighash would mean the same transfer was observed
+                // twice, which can happen on a cold-start re-walk.)
+                if wf.transactions.iter().any(|t| {
+                    matches!(t.kind, TxKind::L2TransferReceived)
+                        && t.l2_sighash.as_deref() == Some(body_sighash_hex.as_str())
+                }) {
+                    continue;
+                }
+                wf.append_tx(TxRecord {
+                    id: new_tx_id(),
+                    kind: TxKind::L2TransferReceived,
+                    created_ts: included_ts,
+                    amount: *amount,
+                    fee_atoms: None,
+                    fee_sat: None,
+                    counterparty: Some(hex::encode(from.serialize())),
+                    status: TxStatus::InBlock {
+                        l2_height: ev.l2_height,
+                        l1_height: ev.l1_height,
+                        included_ts,
+                    },
+                    l1_txid: None,
+                    l2_sighash: Some(body_sighash_hex.clone()),
+                    bip32_index: None,
+                    note: None,
+                });
+            }
+            ObservedTxKind::TransferOut { to, amount, body_sighash_hex } => {
+                // Match a previously-submitted Soft record by sighash.
+                if let Some(rec) = wf.transactions.iter_mut().find(|t| {
+                    matches!(t.kind, TxKind::L2TransferSent)
+                        && t.l2_sighash.as_deref() == Some(body_sighash_hex.as_str())
+                }) {
+                    // Flip Soft (or Failed) → InBlock. Don't touch
+                    // an already-Finalized record. Failed → InBlock
+                    // is a legitimate transition if the sequencer's
+                    // initial reject was racy and the tx eventually
+                    // landed; rare but the algorithmic right thing.
+                    if !matches!(rec.status, TxStatus::Finalized { .. }) {
+                        rec.status = TxStatus::InBlock {
+                            l2_height: ev.l2_height,
+                            l1_height: ev.l1_height,
+                            included_ts,
+                        };
+                    }
+                } else {
+                    // Cold-start backfill: we're seeing our own past
+                    // send for the first time. Create the record
+                    // retroactively in InBlock status.
+                    wf.append_tx(TxRecord {
+                        id: new_tx_id(),
+                        kind: TxKind::L2TransferSent,
+                        created_ts: included_ts,
+                        amount: *amount,
+                        fee_atoms: None, // unknown without re-computing
+                        fee_sat: None,
+                        counterparty: Some(hex::encode(to.serialize())),
+                        status: TxStatus::InBlock {
+                            l2_height: ev.l2_height,
+                            l1_height: ev.l1_height,
+                            included_ts,
+                        },
+                        l1_txid: None,
+                        l2_sighash: Some(body_sighash_hex.clone()),
+                        bip32_index: None,
+                        note: None,
+                    });
+                }
+            }
+            ObservedTxKind::MintIn { amount, nullifier_hex } => {
+                // Match a previously-submitted Soft L2MintApply by
+                // nullifier_hex (which the mint_message ops captures
+                // into l2_sighash). Flip to InBlock if found, else
+                // create a new record (covers third-party mints to
+                // our address and cold-start backfills).
+                if let Some(rec) = wf.transactions.iter_mut().find(|t| {
+                    matches!(t.kind, TxKind::L2MintApply)
+                        && t.l2_sighash.as_deref() == Some(nullifier_hex.as_str())
+                }) {
+                    if !matches!(rec.status, TxStatus::Finalized { .. }) {
+                        rec.status = TxStatus::InBlock {
+                            l2_height: ev.l2_height,
+                            l1_height: ev.l1_height,
+                            included_ts,
+                        };
+                    }
+                } else {
+                    wf.append_tx(TxRecord {
+                        id: new_tx_id(),
+                        kind: TxKind::L2MintApply,
+                        created_ts: included_ts,
+                        amount: *amount,
+                        fee_atoms: None,
+                        fee_sat: None,
+                        counterparty: None,
+                        status: TxStatus::InBlock {
+                            l2_height: ev.l2_height,
+                            l1_height: ev.l1_height,
+                            included_ts,
+                        },
+                        l1_txid: None,
+                        l2_sighash: Some(nullifier_hex.clone()),
+                        bip32_index: None,
+                        note: None,
+                    });
+                }
+            }
+        }
+    }
+}
 
 // ---------- Keygen ----------
 
@@ -825,17 +950,26 @@ pub async fn light_balance(wallet_path: &Path, input: LightBalanceInput) -> Resu
         }
     }
 
-    let (mut head, mode, blocks_verified) = match wf.verified_head.take() {
+    let (mut head, mode, blocks_verified, events) = match wf.verified_head.take() {
         None => {
             let h = verify::bootstrap(&api, &esplora, own_addr).await?;
-            let (h, n) = verify::walk_forward(h, &api, &esplora).await?;
-            (h, LightBalanceMode::ColdStart, n)
+            let (h, n, evs) = verify::walk_forward(h, &api, &esplora).await?;
+            (h, LightBalanceMode::ColdStart, n, evs)
         }
         Some(h) => {
-            let (h, n) = verify::walk_forward(h, &api, &esplora).await?;
-            (h, LightBalanceMode::WarmStart, n)
+            let (h, n, evs) = verify::walk_forward(h, &api, &esplora).await?;
+            (h, LightBalanceMode::WarmStart, n, evs)
         }
     };
+
+    // Project walk-forward events into TxRecord changes. Existing
+    // Soft records get flipped to InBlock when matched by
+    // sighash/nullifier; unmatched events become new records (this
+    // covers inbound transfers, third-party mints to our address,
+    // and cold-start backfills of our own past sends).
+    if !events.is_empty() {
+        project_events(&mut wf, &events);
+    }
 
     // One-time top-up for wallets that persisted a `VerifiedHead`
     // before `total_minted_atoms` existed: the field defaults to 0
