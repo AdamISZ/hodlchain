@@ -84,6 +84,14 @@ pub fn list_mints(
     err_to_string(ops::list_mints(&path))
 }
 
+#[tauri::command]
+pub fn list_transactions(
+    state: State<AppState>,
+) -> Result<Vec<hodl_wallet::wallet::TxRecord>, String> {
+    let path = err_to_string(state.resolve_current_path())?;
+    err_to_string(ops::list_transactions(&path))
+}
+
 // ---------- Mints (L1 side) ----------
 
 #[tauri::command]

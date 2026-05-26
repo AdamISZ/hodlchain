@@ -22,6 +22,7 @@ import type {
   ReclaimableMint,
   ReclaimMintInput,
   ReclaimMintOutput,
+  TxRecord,
 } from "./types";
 
 // ---------- Wallet management ----------
@@ -46,6 +47,9 @@ export const address = (): Promise<string> => invoke("address");
 // ---------- L1 mints ----------
 
 export const listMints = (): Promise<MintRecord[]> => invoke("list_mints");
+
+export const listTransactions = (): Promise<TxRecord[]> =>
+  invoke("list_transactions");
 
 export const mintUtxo = (input: MintUtxoInput): Promise<MintUtxoOutput> =>
   invoke("mint_utxo", { input });

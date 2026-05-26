@@ -9,7 +9,8 @@ export type View =
   | "mint"
   | "transfer"
   | "reclaim"
-  | "overview";
+  | "overview"
+  | "history";
 
 export const session = $state({
   view: "loading" as View,

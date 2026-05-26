@@ -97,6 +97,7 @@
     <button onclick={() => go("transfer")}>send</button>
     <button onclick={() => go("reclaim")}>reclaim</button>
     <button onclick={() => go("overview")}>overview</button>
+    <button onclick={() => go("history")}>history</button>
   </nav>
 </header>
 

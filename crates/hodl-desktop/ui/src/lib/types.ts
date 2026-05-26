@@ -62,6 +62,59 @@ export interface MintUtxoOutput {
   mint_address: string;
 }
 
+// ---------- transaction history ----------
+
+/**
+ * The kind of event a `TxRecord` describes. Mirror of the Rust
+ * `hodl_wallet::wallet::TxKind` enum (snake_case wire format).
+ */
+export type TxKind =
+  | "l1_deposit"
+  | "l1_reclaim"
+  | "l2_mint_apply"
+  | "l2_transfer_sent"
+  | "l2_transfer_received";
+
+/**
+ * Lifecycle state of a `TxRecord`. Internally-tagged enum with `kind`
+ * discriminator — switch on `status.kind` in the UI.
+ *
+ *   - `soft`: L2 only — sequencer-accepted, awaiting next L2 block.
+ *   - `l1_mempool`: L1 only — broadcast, awaiting confirmation.
+ *   - `in_block`: in some block; L2 block for L2 records, L1 block
+ *     for L1 records.
+ *   - `finalized`: L1-anchored past the reorg-finality depth.
+ *   - `failed`: terminal failure (sequencer reject, broadcast fail).
+ */
+export type TxStatus =
+  | { kind: "soft"; since_ts: number }
+  | { kind: "l1_mempool"; since_ts: number }
+  | { kind: "in_block"; l2_height: number; l1_height: number; included_ts: number }
+  | { kind: "finalized"; l2_height: number; l1_height: number }
+  | { kind: "failed"; reason: string; ts: number };
+
+/** One row in the wallet's transaction history. */
+export interface TxRecord {
+  /** Stable local id (16 hex chars). */
+  id: string;
+  kind: TxKind;
+  /** Unix-seconds creation time. */
+  created_ts: number;
+  /** Amount in sat (L1 records) or atoms (L2 records). */
+  amount: number;
+  /** L2 transfer fee in atoms, if applicable. */
+  fee_atoms?: number | null;
+  /** L1 reclaim miner fee in sat, if applicable. */
+  fee_sat?: number | null;
+  /** Address or hex pubkey of the "other side" of the tx. */
+  counterparty?: string | null;
+  status: TxStatus;
+  l1_txid?: string | null;
+  l2_sighash?: string | null;
+  bip32_index?: number | null;
+  note?: string | null;
+}
+
 export type MintFundingState = "unfunded" | "pending" | "confirmed";
 
 export interface CheckMintFundingInput {

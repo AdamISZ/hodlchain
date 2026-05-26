@@ -341,6 +341,18 @@ pub fn list_mints(wallet_path: &Path) -> Result<Vec<MintRecord>> {
     Ok(wf.mints)
 }
 
+// ---------- List transaction history ----------
+
+/// Return every persisted `TxRecord` in this wallet, **newest-first**.
+/// The wallet stores them in append order (oldest first); we reverse
+/// here so UIs can render the list directly without re-sorting.
+pub fn list_transactions(wallet_path: &Path) -> Result<Vec<TxRecord>> {
+    let wf = WalletFile::load(wallet_path)?;
+    let mut out = wf.transactions;
+    out.reverse();
+    Ok(out)
+}
+
 // ---------- Mint Message ----------
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
