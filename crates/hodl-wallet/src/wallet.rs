@@ -441,6 +441,30 @@ impl WalletFile {
         self.mints.push(record);
     }
 
+    /// Append a transaction-history record. The caller is responsible
+    /// for `wf.save()` afterwards; we don't auto-save because most
+    /// ops batch this with other state mutations (e.g. flipping
+    /// `MintRecord.minted = true`) and the save should be one shot.
+    pub fn append_tx(&mut self, record: TxRecord) {
+        self.transactions.push(record);
+    }
+
+    /// Find a `TxRecord` by its local id (the 16-hex string returned
+    /// by `new_tx_id`). Returned for the walk-forward path to flip
+    /// status on already-tracked records.
+    pub fn find_tx_by_id_mut(&mut self, id: &str) -> Option<&mut TxRecord> {
+        self.transactions.iter_mut().find(|t| t.id == id)
+    }
+
+    /// Find the first `L1Deposit` record for the given `bip32_index`.
+    /// Used by `check_mint_funding` to avoid creating a duplicate
+    /// record on repeat polls once we already know about the deposit.
+    pub fn find_l1_deposit_tx_mut(&mut self, bip32_index: u32) -> Option<&mut TxRecord> {
+        self.transactions
+            .iter_mut()
+            .find(|t| matches!(t.kind, TxKind::L1Deposit) && t.bip32_index == Some(bip32_index))
+    }
+
     /// Look up a mint by its BIP32 derivation index — the canonical
     /// stable identifier (the deposit address is also unique but the
     /// index is shorter and used at every CLI / UI boundary).

@@ -35,7 +35,10 @@ use crate::api::ApiClient;
 use crate::esplora::{self, EsploraClient};
 use crate::reclaim;
 use crate::verify;
-use crate::wallet::{parse_outpoint, MintRecord, NetworkName, WalletFile};
+use crate::wallet::{
+    new_tx_id, now_ts, parse_outpoint, MintRecord, NetworkName, TxKind, TxRecord, TxStatus,
+    WalletFile,
+};
 
 // ---------- Keygen ----------
 
@@ -288,6 +291,33 @@ pub async fn check_mint_funding(
         r.outpoint = Some(outpoint_s.clone());
         r.value_sat = Some(u.value);
         r.funded_at_height = height;
+
+        // History: record the L1 deposit at first confirmed observation.
+        // Subsequent polls find the existing record and leave it alone
+        // (status flip to Finalized is handled by the walk-forward
+        // pass once L1 confs grow past REORG_FINALITY_DEPTH; not
+        // captured here in step 2).
+        if wf.find_l1_deposit_tx_mut(input.bip32_index).is_none() {
+            wf.append_tx(TxRecord {
+                id: new_tx_id(),
+                kind: TxKind::L1Deposit,
+                created_ts: now_ts(),
+                amount: u.value,
+                fee_atoms: None,
+                fee_sat: None,
+                counterparty: Some(record.mint_address.clone()),
+                status: TxStatus::InBlock {
+                    l2_height: 0,
+                    l1_height: height.unwrap_or(0),
+                    included_ts: now_ts(),
+                },
+                l1_txid: Some(u.txid.to_string()),
+                l2_sighash: None,
+                bip32_index: Some(input.bip32_index),
+                note: None,
+            });
+        }
+
         wf.save(wallet_path)?;
         (Some(outpoint_s), Some(u.value), height)
     } else {
@@ -386,6 +416,42 @@ pub async fn mint_message(wallet_path: &Path, input: MintMessageInput) -> Result
         if let Some(r) = wf.find_mint_by_index_mut(input.bip32_index) {
             r.minted = true;
         }
+        wf.append_tx(TxRecord {
+            id: new_tx_id(),
+            kind: TxKind::L2MintApply,
+            created_ts: now_ts(),
+            amount: resp.mint_amount.unwrap_or(0),
+            fee_atoms: None,
+            fee_sat: None,
+            counterparty: Some(hex::encode(l2_destination.serialize())),
+            status: TxStatus::Soft { since_ts: now_ts() },
+            l1_txid: None,
+            l2_sighash: resp.nullifier_hex.clone(),
+            bip32_index: Some(input.bip32_index),
+            note: None,
+        });
+        wf.save(wallet_path)?;
+    } else {
+        wf.append_tx(TxRecord {
+            id: new_tx_id(),
+            kind: TxKind::L2MintApply,
+            created_ts: now_ts(),
+            amount: 0,
+            fee_atoms: None,
+            fee_sat: None,
+            counterparty: Some(hex::encode(l2_destination.serialize())),
+            status: TxStatus::Failed {
+                reason: resp
+                    .error
+                    .clone()
+                    .unwrap_or_else(|| "sequencer rejected mint (no error string)".into()),
+                ts: now_ts(),
+            },
+            l1_txid: None,
+            l2_sighash: None,
+            bip32_index: Some(input.bip32_index),
+            note: None,
+        });
         wf.save(wallet_path)?;
     }
     Ok(MintMessageOutput {
@@ -429,7 +495,7 @@ pub fn compute_transfer_fee(amount: u64) -> u64 {
 }
 
 pub async fn transfer(wallet_path: &Path, input: TransferInput) -> Result<TransferOutput> {
-    let wf = WalletFile::load(wallet_path)?;
+    let mut wf = WalletFile::load(wallet_path)?;
     let secp = Secp256k1::new();
     let kp = wf.l2_identity_keypair(&secp)?;
     let from = wf.l2_identity_xonly(&secp)?;
@@ -445,11 +511,54 @@ pub async fn transfer(wallet_path: &Path, input: TransferInput) -> Result<Transf
         amount: input.amount,
         nonce: bal.effective_nonce,
     };
-    let msg = Message::from_digest(body.sighash().0);
+    let sighash_bytes = body.sighash().0;
+    let msg = Message::from_digest(sighash_bytes);
     let signature = secp.sign_schnorr(&msg, &kp);
     let signed = SignedTransfer { body, signature };
     let resp = api.submit_transfer(signed).await?;
     let fee = compute_transfer_fee(input.amount);
+
+    let counterparty = hex::encode(input.to.serialize());
+    let sighash_hex = hex::encode(sighash_bytes);
+    if resp.accepted {
+        wf.append_tx(TxRecord {
+            id: new_tx_id(),
+            kind: TxKind::L2TransferSent,
+            created_ts: now_ts(),
+            amount: input.amount,
+            fee_atoms: Some(fee),
+            fee_sat: None,
+            counterparty: Some(counterparty),
+            status: TxStatus::Soft { since_ts: now_ts() },
+            l1_txid: None,
+            l2_sighash: Some(sighash_hex),
+            bip32_index: None,
+            note: None,
+        });
+    } else {
+        wf.append_tx(TxRecord {
+            id: new_tx_id(),
+            kind: TxKind::L2TransferSent,
+            created_ts: now_ts(),
+            amount: input.amount,
+            fee_atoms: Some(fee),
+            fee_sat: None,
+            counterparty: Some(counterparty),
+            status: TxStatus::Failed {
+                reason: resp
+                    .error
+                    .clone()
+                    .unwrap_or_else(|| "sequencer rejected transfer (no error string)".into()),
+                ts: now_ts(),
+            },
+            l1_txid: None,
+            l2_sighash: Some(sighash_hex),
+            bip32_index: None,
+            note: None,
+        });
+    }
+    wf.save(wallet_path)?;
+
     Ok(TransferOutput {
         accepted: resp.accepted,
         error: resp.error,
@@ -957,6 +1066,23 @@ pub async fn reclaim_mint(wallet_path: &Path, input: ReclaimMintInput) -> Result
     let txid = esplora.broadcast(&tx).await.context("broadcast reclaim tx")?;
 
     wf.mints[record_position].reclaimed = true;
+    wf.append_tx(TxRecord {
+        id: new_tx_id(),
+        kind: TxKind::L1Reclaim,
+        created_ts: now_ts(),
+        amount: value_sat.saturating_sub(input.fee_sat),
+        fee_atoms: None,
+        fee_sat: Some(input.fee_sat),
+        counterparty: Some(dest.to_string()),
+        // Reclaim is just-broadcast at this point; we don't poll for
+        // confirmations here. Step-6 walk-forward will flip this to
+        // InBlock / Finalized once esplora reports confs.
+        status: TxStatus::L1Mempool { since_ts: now_ts() },
+        l1_txid: Some(txid.to_string()),
+        l2_sighash: None,
+        bip32_index: Some(input.bip32_index),
+        note: None,
+    });
     wf.save(wallet_path)?;
 
     Ok(ReclaimMintOutput {
