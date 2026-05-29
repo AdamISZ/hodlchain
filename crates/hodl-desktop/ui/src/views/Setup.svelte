@@ -20,6 +20,15 @@
   let esploraUrl = $state("http://127.0.0.1:28081");
   let restorePhrase = $state("");
 
+  // Mainnet gate. The POC is experimental and routing real BTC through
+  // it is a foot-gun, so by default the network selector hides the
+  // `bitcoin` option entirely. A maintainer building a release that
+  // does want mainnet exposed runs:
+  //   VITE_POC_ALLOW_MAINNET=1 pnpm build
+  // CLI users can still pick mainnet deliberately (the wallet's
+  // Network type is unchanged); this only hides the UI affordance.
+  const allowMainnet = import.meta.env.VITE_POC_ALLOW_MAINNET === "1";
+
   let busy = $state(false);
   let err = $state<string | null>(null);
   let mnemonic = $state<string | null>(null);
@@ -115,7 +124,7 @@
         <input
           id="name"
           type="text"
-          placeholder="e.g. alice, mainnet-cold"
+          placeholder="e.g. alice, signet-cold"
           bind:value={name}
         />
         <small class="muted">
@@ -152,8 +161,16 @@
           <option value="regtest">regtest</option>
           <option value="signet">signet</option>
           <option value="testnet">testnet</option>
-          <option value="bitcoin">bitcoin (mainnet)</option>
+          {#if allowMainnet}
+            <option value="bitcoin">bitcoin (mainnet)</option>
+          {/if}
         </select>
+        {#if !allowMainnet}
+          <small class="muted">
+            mainnet is intentionally hidden in POC builds. See the
+            <code>VITE_POC_ALLOW_MAINNET</code> flag if you need it.
+          </small>
+        {/if}
       </div>
 
       <div class="field">
