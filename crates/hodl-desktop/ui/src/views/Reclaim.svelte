@@ -114,6 +114,14 @@
               <div class="header">
                 <strong>#{m.bip32_index}</strong>
                 <span class="badge badge-{m.status}">{m.status.toUpperCase()}</span>
+                {#if m.minted}
+                  <span class="badge badge-minted" title="L2 mint message was accepted; you've claimed the L2 atoms for this deposit.">MINTED</span>
+                {:else if m.status !== "pending"}
+                  <!-- Pending mints don't have a funded UTXO yet, so
+                       "unminted" is the trivially-true status; only
+                       surface it once funding is in (status >= locked). -->
+                  <span class="badge badge-unminted" title="The deposit is funded but no mint message has been submitted yet. You can still claim the L2 credit from the Dashboard's pending-mints surface.">UNMINTED</span>
+                {/if}
                 <span class="muted">T={m.lock_blocks} blocks</span>
                 {#if m.value_sat != null}
                   <span class="muted">· {m.value_sat} sat</span>
@@ -263,6 +271,14 @@
   .badge-reclaimed {
     color: var(--color-text-muted);
     background: var(--color-bg);
+  }
+  .badge-minted {
+    color: #1e40af;
+    background: #dbeafe;
+  }
+  .badge-unminted {
+    color: #92400e;
+    background: #fffbeb;
   }
   .overlay {
     position: fixed;

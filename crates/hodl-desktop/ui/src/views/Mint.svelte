@@ -1,12 +1,7 @@
 <script lang="ts">
-  import { onDestroy } from "svelte";
+  import { onDestroy, onMount } from "svelte";
   import * as api from "../lib/api";
-  import type {
-    MintUtxoOutput,
-    CheckMintFundingOutput,
-    MintMessageOutput,
-  } from "../lib/types";
-  import { go } from "../lib/state.svelte";
+  import { go, session, type ActiveMint } from "../lib/state.svelte";
   import AddressBox from "../lib/components/AddressBox.svelte";
 
   // Three-stage flow:
@@ -19,28 +14,45 @@
   //                 confirmed UTXO appears.
   //   3. mint     — once funded, user clicks "submit mint message"
   //                 to credit the L2 tokens.
+  //
+  // Flow state (stage, utxo, funding poll result, mint receipt,
+  // soft→hard conf tracking) lives in `session.activeMint` so it
+  // survives navigation. When the component remounts after the user
+  // popped out to the Dashboard, we restore from session and restart
+  // any polls that were in flight.
 
-  type Stage = "form" | "funding" | "mint" | "done";
-
-  let stage = $state<Stage>("form");
-  let lockBlocks = $state(10000);
-
+  // Component-local transient state — form input, busy/error flags,
+  // and the timer handles themselves (runtime objects, not data).
+  let formLockBlocks = $state(10000);
   let busy = $state(false);
   let err = $state<string | null>(null);
-  let utxo = $state<MintUtxoOutput | null>(null);
-  let funding = $state<CheckMintFundingOutput | null>(null);
-  let msg = $state<MintMessageOutput | null>(null);
-
-  // Soft → L1-confirmed tracking for an accepted mint, mirroring
-  // Transfer.svelte. The mint message goes into mempool → next L2
-  // block credits the destination → L1 attestation lands → we flip
-  // the pill.
-  let confStage = $state<"soft" | "hard">("soft");
-  let confirmedAtUnix = $state<number | null>(null);
+  let pollTimer: ReturnType<typeof setInterval> | null = null;
   let confTimer: ReturnType<typeof setInterval> | null = null;
+
+  const FUNDING_POLL_INTERVAL_MS = 5_000;
   const CONF_POLL_INTERVAL_MS = 5_000;
 
-  let pollTimer: ReturnType<typeof setInterval> | null = null;
+  // The current stage, derived from session. "form" when no active
+  // mint exists; otherwise tracked in session.activeMint.stage.
+  let stage = $derived(session.activeMint?.stage ?? "form");
+
+  onMount(() => {
+    // Resume any in-flight polling that was happening when the user
+    // navigated away.
+    if (session.activeMint?.stage === "funding") {
+      void poll();
+      pollTimer = setInterval(() => void poll(), FUNDING_POLL_INTERVAL_MS);
+    }
+    if (
+      session.activeMint?.stage === "done" &&
+      session.activeMint.confStage === "soft" &&
+      session.activeMint.msg?.accepted &&
+      session.activeMint.msg?.soft_conf
+    ) {
+      void pollForHardConf();
+      confTimer = setInterval(() => void pollForHardConf(), CONF_POLL_INTERVAL_MS);
+    }
+  });
 
   onDestroy(() => {
     if (pollTimer !== null) clearInterval(pollTimer);
@@ -48,12 +60,13 @@
   });
 
   async function pollForHardConf() {
-    if (msg === null || !msg.soft_conf) return;
+    const mint = session.activeMint;
+    if (mint === null || mint.msg === null || !mint.msg.soft_conf) return;
     try {
       const head = await api.lightBalance({ addr: null });
-      if (head.l2_height >= msg.soft_conf.target_l2_height) {
-        confStage = "hard";
-        confirmedAtUnix = Math.floor(Date.now() / 1000);
+      if (head.l2_height >= mint.msg.soft_conf.target_l2_height) {
+        mint.confStage = "hard";
+        mint.confirmedAtUnix = Math.floor(Date.now() / 1000);
         if (confTimer !== null) { clearInterval(confTimer); confTimer = null; }
       }
     } catch (e) {
@@ -69,11 +82,20 @@
     err = null;
     busy = true;
     try {
-      utxo = await api.mintUtxo({ lock_blocks: lockBlocks });
-      stage = "funding";
-      // Kick off a poll right away, then every 5s.
+      const utxo = await api.mintUtxo({ lock_blocks: formLockBlocks });
+      const fresh: ActiveMint = {
+        stage: "funding",
+        lockBlocks: formLockBlocks,
+        utxo,
+        funding: null,
+        msg: null,
+        confStage: "soft",
+        confirmedAtUnix: null,
+      };
+      session.activeMint = fresh;
+      // Kick off a poll right away, then every FUNDING_POLL_INTERVAL_MS.
       void poll();
-      pollTimer = setInterval(() => void poll(), 5000);
+      pollTimer = setInterval(() => void poll(), FUNDING_POLL_INTERVAL_MS);
     } catch (e) {
       err = String(e);
     } finally {
@@ -82,15 +104,17 @@
   }
 
   async function poll() {
-    if (!utxo) return;
+    const mint = session.activeMint;
+    if (mint === null || mint.utxo === null) return;
     try {
-      funding = await api.checkMintFunding({ bip32_index: utxo.bip32_index });
+      const funding = await api.checkMintFunding({ bip32_index: mint.utxo.bip32_index });
+      mint.funding = funding;
       if (funding.state === "confirmed") {
         if (pollTimer !== null) {
           clearInterval(pollTimer);
           pollTimer = null;
         }
-        stage = "mint";
+        mint.stage = "mint";
       }
     } catch (e) {
       err = String(e);
@@ -107,17 +131,17 @@
   }
 
   async function submitMessage() {
-    if (!utxo) return;
+    const mint = session.activeMint;
+    if (mint === null || mint.utxo === null) return;
     err = null;
     busy = true;
     try {
-      msg = await api.mintMessage({ bip32_index: utxo.bip32_index, to: null });
-      stage = "done";
-      // Start tracking soft → L1-confirmed if the sequencer
-      // returned a receipt.
-      confStage = "soft";
-      confirmedAtUnix = null;
-      if (msg.accepted && msg.soft_conf) {
+      const out = await api.mintMessage({ bip32_index: mint.utxo.bip32_index, to: null });
+      mint.msg = out;
+      mint.stage = "done";
+      mint.confStage = "soft";
+      mint.confirmedAtUnix = null;
+      if (out.accepted && out.soft_conf) {
         // Fire one immediately (in case enough L1 blocks have
         // already elapsed) plus a timer for follow-ups. The poll
         // clears its own timer once it flips to hard.
@@ -130,10 +154,20 @@
       busy = false;
     }
   }
+
+  // Clear the in-flight state when leaving from the "done" screen so
+  // the next visit to Mint starts a fresh form. Mid-flow back-clicks
+  // intentionally preserve activeMint so a Dashboard detour is safe.
+  function back() {
+    if (session.activeMint?.stage === "done") {
+      session.activeMint = null;
+    }
+    go("dashboard");
+  }
 </script>
 
 <header class="topbar">
-  <button onclick={() => go("dashboard")}>← back</button>
+  <button onclick={back}>← back</button>
   <h2>deposit BTC → L2</h2>
   <span></span>
 </header>
@@ -157,7 +191,7 @@
           type="number"
           min="1"
           max="65535"
-          bind:value={lockBlocks}
+          bind:value={formLockBlocks}
         />
         <small class="muted">BIP112 range: 1 .. 65535 blocks</small>
       </div>
@@ -167,22 +201,22 @@
         </button>
       </div>
     </div>
-  {:else if stage === "funding" && utxo}
+  {:else if stage === "funding" && session.activeMint?.utxo}
     <div class="card stack">
       <p>
         Send any BTC amount to this address from your normal wallet:
       </p>
-      <AddressBox value={utxo.mint_address} />
+      <AddressBox value={session.activeMint.utxo.mint_address} />
       <dl>
         <dt>bip32_index</dt>
-        <dd>{utxo.bip32_index}</dd>
+        <dd>{session.activeMint.utxo.bip32_index}</dd>
         <dt>lock</dt>
-        <dd>{utxo.lock_blocks} L1 blocks</dd>
+        <dd>{session.activeMint.utxo.lock_blocks} L1 blocks</dd>
         <dt>funding status</dt>
         <dd>
-          {#if !funding || funding.state === "unfunded"}
+          {#if !session.activeMint.funding || session.activeMint.funding.state === "unfunded"}
             no UTXO observed yet
-          {:else if funding.state === "pending"}
+          {:else if session.activeMint.funding.state === "pending"}
             UTXO seen in mempool, waiting for 1 confirmation
           {:else}
             confirmed
@@ -199,18 +233,18 @@
         </button>
       </div>
     </div>
-  {:else if stage === "mint" && utxo && funding}
+  {:else if stage === "mint" && session.activeMint?.utxo && session.activeMint?.funding}
     <div class="card stack">
       <p>
         <span class="success">✓ deposit confirmed</span> at L1 height
-        {funding.funded_at_height}. Submit the mint message to credit
-        your L2 tokens.
+        {session.activeMint.funding.funded_at_height}. Submit the mint
+        message to credit your L2 tokens.
       </p>
       <dl>
         <dt>outpoint</dt>
-        <dd class="mono small">{funding.outpoint}</dd>
+        <dd class="mono small">{session.activeMint.funding.outpoint}</dd>
         <dt>value</dt>
-        <dd>{funding.value_sat} sat</dd>
+        <dd>{session.activeMint.funding.value_sat} sat</dd>
       </dl>
       <div>
         <button class="primary" disabled={busy} onclick={submitMessage}>
@@ -218,20 +252,20 @@
         </button>
       </div>
     </div>
-  {:else if stage === "done" && msg}
+  {:else if stage === "done" && session.activeMint?.msg}
     <div class="card stack">
-      {#if msg.accepted}
+      {#if session.activeMint.msg.accepted}
         <p>
           <span class="success">✓ accepted</span>
-          {#if confStage === "soft"}
+          {#if session.activeMint.confStage === "soft"}
             <span class="tag soft">soft</span>
           {:else}
             <span class="tag hard">L1-confirmed</span>
           {/if}
         </p>
         <p>
-          <strong>{msg.mint_amount ?? "?"}</strong> L2 atoms
-          {#if confStage === "hard"}
+          <strong>{session.activeMint.msg.mint_amount ?? "?"}</strong> L2 atoms
+          {#if session.activeMint.confStage === "hard"}
             credited.
           {:else}
             will be credited.
@@ -239,37 +273,37 @@
         </p>
         <dl>
           <dt>nullifier</dt>
-          <dd class="mono small">{msg.nullifier_hex}</dd>
-          {#if msg.soft_conf}
+          <dd class="mono small">{session.activeMint.msg.nullifier_hex}</dd>
+          {#if session.activeMint.msg.soft_conf}
             <dt>target L2 height</dt>
-            <dd>{msg.soft_conf.target_l2_height}</dd>
-            {#if confirmedAtUnix !== null}
+            <dd>{session.activeMint.msg.soft_conf.target_l2_height}</dd>
+            {#if session.activeMint.confirmedAtUnix !== null}
               <dt>L1-confirmed at</dt>
-              <dd class="small">{fmtUnix(confirmedAtUnix)}</dd>
+              <dd class="small">{fmtUnix(session.activeMint.confirmedAtUnix)}</dd>
             {/if}
           {/if}
         </dl>
-        {#if confStage === "soft"}
+        {#if session.activeMint.confStage === "soft"}
           <p class="muted small">
             Sequencer has soft-confirmed your mint. Watching the L1
             attestation chain for L2 height
-            {msg.soft_conf?.target_l2_height}; the pill above will
-            flip to "L1-confirmed" automatically.
+            {session.activeMint.msg.soft_conf?.target_l2_height}; the
+            pill above will flip to "L1-confirmed" automatically.
           </p>
         {:else}
           <p class="muted small">
-            L2 block {msg.soft_conf?.target_l2_height} is
-            L1-attested. The mint is final.
+            L2 block {session.activeMint.msg.soft_conf?.target_l2_height}
+            is L1-attested. The mint is final.
           </p>
         {/if}
       {:else}
         <p>
           <span class="error">rejected:</span>
-          {msg.error ?? "(no error message)"}
+          {session.activeMint.msg.error ?? "(no error message)"}
         </p>
       {/if}
       <div>
-        <button class="primary" onclick={() => go("dashboard")}>
+        <button class="primary" onclick={back}>
           back to dashboard
         </button>
       </div>

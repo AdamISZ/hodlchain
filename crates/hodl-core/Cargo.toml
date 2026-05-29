@@ -25,6 +25,7 @@ std = [
 
 [dependencies]
 bitcoin = { workspace = true, default-features = false }
+bech32 = { workspace = true }
 secp256k1 = { workspace = true, default-features = false }
 serde = { workspace = true, default-features = false, features = ["derive", "alloc"] }
 hex = { workspace = true, default-features = false }

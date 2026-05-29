@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onDestroy, onMount } from "svelte";
   import * as api from "../lib/api";
-  import type { BalanceOutput, LightBalanceOutput } from "../lib/types";
+  import type { BalanceOutput, LightBalanceOutput, MintRecord } from "../lib/types";
   import { go, session } from "../lib/state.svelte";
   import AddressBox from "../lib/components/AddressBox.svelte";
 
@@ -22,6 +22,18 @@
   let err = $state<string | null>(null);
   let pollTimer: ReturnType<typeof setInterval> | null = null;
 
+  // Mints whose L1 deposit has confirmed but whose L2 mint-message has
+  // not yet been submitted. These are at risk of *silent L2 credit
+  // forfeit* — the BTC is recoverable via the reclaim path once the
+  // CSV expires, but the L2 atoms only land if the user (re-)submits
+  // the mint message. The Mint flow lives in component-local state, so
+  // any navigation mid-flow loses the in-progress submit; surfacing the
+  // funded-but-unminted records here gives the user a recovery path.
+  let pendingMints = $state<MintRecord[]>([]);
+  // Per-row busy state so submitting one doesn't grey out the others.
+  let submitting = $state<Record<number, boolean>>({});
+  let pendingErr = $state<string | null>(null);
+
   // Auto-poll cadence. The L2 produces a fresh block every 30s by
   // default, so 10s polling reliably picks up new blocks within
   // one full block interval — fast enough to feel live, slow enough
@@ -36,10 +48,47 @@
       // verify in the background.
       soft = await api.balance({ addr: null });
       verified = await api.lightBalance({ addr: null });
+      // Pending-mint refresh runs alongside balance; cheap (reads the
+      // wallet file). If it fails we surface the error in its own slot
+      // so a transient list_mints error doesn't blank the balance card.
+      await refreshPendingMints();
     } catch (e) {
       err = String(e);
     } finally {
       busy = false;
+    }
+  }
+
+  async function refreshPendingMints() {
+    try {
+      const all = await api.listMints();
+      // Funded-but-unminted: deposit landed on L1 (funded_at_height
+      // populated), no mint message accepted yet, not reclaimed.
+      pendingMints = all.filter(
+        (m) => m.funded_at_height != null && !m.minted && !m.reclaimed,
+      );
+      pendingErr = null;
+    } catch (e) {
+      pendingErr = String(e);
+    }
+  }
+
+  async function submitMintMessage(bip32_index: number) {
+    pendingErr = null;
+    submitting = { ...submitting, [bip32_index]: true };
+    try {
+      const out = await api.mintMessage({ bip32_index, to: null });
+      if (!out.accepted) {
+        pendingErr = `mint #${bip32_index} rejected: ${out.error ?? "(no error)"}`;
+      }
+      // Refresh both the pending list (the mint should drop off on
+      // success) and the balance (atoms should land soft).
+      await refreshPendingMints();
+      soft = await api.balance({ addr: null });
+    } catch (e) {
+      pendingErr = `mint #${bip32_index} failed: ${e}`;
+    } finally {
+      submitting = { ...submitting, [bip32_index]: false };
     }
   }
 
@@ -56,6 +105,11 @@
   async function switchWallet() {
     await api.deselectWallet();
     session.currentWallet = null;
+    // Active-mint state is wallet-scoped (bip32_index lives on the
+    // outgoing wallet). Drop it on switch so the next wallet doesn't
+    // see a phantom "in-flight mint" banner pointing at someone else's
+    // record.
+    session.activeMint = null;
     go("picker");
   }
 
@@ -137,6 +191,63 @@
         </div>
       {/if}
     </div>
+
+    {#if session.activeMint && session.activeMint.stage !== "done"}
+      <button class="card inflight-banner" onclick={() => go("mint")}>
+        <span class="inflight-pulse"></span>
+        <span class="inflight-text">
+          <strong>resume your in-flight mint</strong>
+          <span class="muted small">
+            {#if session.activeMint.stage === "funding"}
+              waiting for L1 deposit to confirm
+            {:else if session.activeMint.stage === "mint"}
+              deposit confirmed — submit the mint message
+            {:else}
+              click to resume
+            {/if}
+          </span>
+        </span>
+        <span class="inflight-arrow">→</span>
+      </button>
+    {/if}
+
+    {#if pendingMints.length > 0}
+      <div class="card pending">
+        <h3>pending mints — awaiting your mint message</h3>
+        <p class="muted small">
+          The deposit BTC has confirmed on L1, but the L2 credit hasn't
+          been claimed yet. Submit the mint message to receive the L2
+          atoms. (The BTC stays under your reclaim path either way; the
+          atoms only land once the message is accepted.)
+        </p>
+        {#if pendingErr}
+          <div class="error small">{pendingErr}</div>
+        {/if}
+        <ul class="pending-list">
+          {#each pendingMints as m (m.bip32_index)}
+            <li class="pending-row">
+              <div class="meta">
+                <div class="header">
+                  <strong>#{m.bip32_index}</strong>
+                  {#if m.value_sat != null}
+                    <span class="muted small">· {fmtAtoms(m.value_sat)} sat</span>
+                  {/if}
+                  <span class="muted small">· T={m.lock_blocks} blocks</span>
+                </div>
+                <AddressBox value={m.mint_address} size="compact" />
+              </div>
+              <button
+                class="primary"
+                disabled={submitting[m.bip32_index] === true}
+                onclick={() => void submitMintMessage(m.bip32_index)}
+              >
+                {submitting[m.bip32_index] === true ? "submitting…" : "submit mint message"}
+              </button>
+            </li>
+          {/each}
+        </ul>
+      </div>
+    {/if}
 
     {#if verified !== null}
       <div class="card details">
@@ -233,6 +344,93 @@
   .details h3 {
     margin: 0 0 var(--space-3);
     font-size: 0.95rem;
+    color: var(--color-text-muted);
+  }
+  .pending {
+    /* Subtle accent so users notice this card without it screaming —
+       the inline copy already explains the stakes. */
+    border-color: var(--color-warning, #fcd34d);
+    background: #fffbeb;
+  }
+  .pending h3 {
+    margin: 0 0 var(--space-2);
+    font-size: 0.95rem;
+    color: #92400e;
+  }
+  .pending-list {
+    list-style: none;
+    margin: var(--space-3) 0 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+  }
+  .pending-row {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--space-3);
+    padding: var(--space-3);
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+  }
+  .pending-row .meta {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+  }
+  .pending-row .header {
+    display: flex;
+    align-items: baseline;
+    gap: var(--space-2);
+    flex-wrap: wrap;
+  }
+  .pending-row button {
+    flex-shrink: 0;
+    white-space: nowrap;
+  }
+  .inflight-banner {
+    /* The whole card is a button — visual treatment is "informational
+       row with affordance", not a primary CTA. */
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    padding: var(--space-3) var(--space-4);
+    width: 100%;
+    background: var(--color-surface);
+    border: 1px solid var(--color-accent, var(--color-border));
+    border-radius: var(--radius);
+    text-align: left;
+    cursor: pointer;
+  }
+  .inflight-banner:hover {
+    border-color: var(--color-accent);
+    background: var(--color-bg);
+  }
+  .inflight-pulse {
+    display: inline-block;
+    width: 0.5rem;
+    height: 0.5rem;
+    border-radius: 50%;
+    background: var(--color-accent);
+    animation: inflight-pulse 1.6s ease-in-out infinite;
+    flex-shrink: 0;
+  }
+  @keyframes inflight-pulse {
+    0%, 100% { opacity: 0.4; transform: scale(1); }
+    50%      { opacity: 1;   transform: scale(1.2); }
+  }
+  .inflight-text {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.1rem;
+  }
+  .inflight-arrow {
+    flex-shrink: 0;
     color: var(--color-text-muted);
   }
   .address-row {

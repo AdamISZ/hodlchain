@@ -16,6 +16,7 @@
   },
   "dependencies": {
     "@tauri-apps/api": "^2.0.0",
+    "bech32": "^2.0.0",
     "qrcode": "^1.5.4"
   },
   "devDependencies": {

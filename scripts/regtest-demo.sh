@@ -393,8 +393,11 @@ say "verifying alice's balance against the node's state_root (Phase 2)"
 "$WALLET_BIN" --wallet "$ALICE_WALLET" verify-balance | sed 's/^/    /'
 
 # Also verify a non-existent third-party address — should come back as
-# an empty-leaf proof that still verifies.
-THIRD=0000000000000000000000000000000000000000000000000000000000000001
+# an empty-leaf proof that still verifies. This is the bech32m
+# encoding of the 32-byte payload `0…01` under the regtest HRP
+# (`hcrt`); equivalent to feeding the hex `0…01` to the sequencer's
+# /balance/ endpoint, which `parse_xonly` would accept either form of.
+THIRD=hcrt1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqslps7v3
 say "verifying a non-existent address (expect: empty leaf, balance=0)"
 "$WALLET_BIN" --wallet "$ALICE_WALLET" verify-balance --addr "$THIRD" | sed 's/^/    /'
 

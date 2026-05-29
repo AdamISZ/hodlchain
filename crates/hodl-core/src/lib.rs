@@ -15,6 +15,8 @@
 
 extern crate alloc;
 
+#[cfg(feature = "std")]
+pub mod address;
 pub mod block;
 #[cfg(feature = "std")]
 pub mod config;

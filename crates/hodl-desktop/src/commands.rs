@@ -8,7 +8,8 @@
 //! standard Tauri invoke-rejection path.
 
 use crate::state::AppState;
-use hodl_wallet::{ops, wallets};
+use hodl_core::address;
+use hodl_wallet::{ops, wallets, wallet::WalletFile};
 use serde::Deserialize;
 use tauri::State;
 
@@ -73,7 +74,13 @@ pub fn keygen(
 #[tauri::command]
 pub fn address(state: State<AppState>) -> Result<String, String> {
     let path = err_to_string(state.resolve_current_path())?;
-    err_to_string(ops::address(&path)).map(|x| hex::encode(x.serialize()))
+    // Encode bech32m using the wallet's network. Loading WalletFile a
+    // second time (after ops::address already did) is a few hundred
+    // nanoseconds; doing the encode here keeps `ops::address` returning
+    // the raw XOnlyPublicKey for any internal caller that wants it.
+    let wf = err_to_string(WalletFile::load(&path))?;
+    let pk = err_to_string(ops::address(&path))?;
+    Ok(address::encode(&pk, wf.network))
 }
 
 #[tauri::command]

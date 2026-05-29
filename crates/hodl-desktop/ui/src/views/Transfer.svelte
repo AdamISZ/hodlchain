@@ -1,15 +1,21 @@
 <script lang="ts">
-  import { onDestroy } from "svelte";
+  import { onDestroy, onMount } from "svelte";
   import * as api from "../lib/api";
   import type { TransferOutput } from "../lib/types";
   import { go } from "../lib/state.svelte";
   import { transferFee } from "../lib/consensus";
+  import { decode as decodeAddr } from "../lib/address";
 
   let to = $state("");
   let amount = $state(0);
   let busy = $state(false);
   let err = $state<string | null>(null);
   let result = $state<TransferOutput | null>(null);
+  // The wallet's own bech32m address. Used as the source of truth for
+  // which HRP/class a destination is allowed to use: if we're on
+  // `thc1…`, only other `thc1…` (testnet/signet) addresses can be a
+  // valid destination. Resolved once on mount.
+  let ownAddress = $state<string | null>(null);
   // 'soft' = sequencer-acked, awaiting L1 attestation.
   // 'hard' = verified head has covered target_l2_height (tx is
   //          inside an L1-attested L2 block).
@@ -65,14 +71,39 @@
     }
   }
 
+  onMount(async () => {
+    try {
+      ownAddress = await api.address();
+    } catch (e) {
+      err = `couldn't load own address: ${e}`;
+    }
+  });
+
   onDestroy(() => {
     if (pollTimer !== null) clearInterval(pollTimer);
   });
 
-  // Loose validation. The backend re-validates; we just nudge the
-  // user away from obviously-wrong inputs in the form.
+  // Bech32m validation. Reject early on bad checksums, wrong HRP, or
+  // wrong-network addresses (an `hc1…` pasted into a regtest wallet,
+  // etc). The backend re-validates as the canonical check; this is
+  // just front-of-form feedback. Empty input is "not yet valid", not
+  // an error.
+  let addrError = $derived.by(() => {
+    const trimmed = to.trim();
+    if (trimmed.length === 0) return null;
+    if (ownAddress === null) return null;
+    const own = decodeAddr(ownAddress);
+    if (!own.ok) return null; // shouldn't happen; backend produced it
+    const dest = decodeAddr(trimmed);
+    if (!dest.ok) return dest.error;
+    if (dest.klass !== own.klass) {
+      return `wrong network — expected an address for the same network as your wallet`;
+    }
+    return null;
+  });
+
   let canSubmit = $derived(
-    !busy && /^[0-9a-fA-F]{64}$/.test(to.trim()) && amount > 0,
+    !busy && to.trim().length > 0 && addrError === null && amount > 0,
   );
 
   // Live fee preview as the user types. Mirrors apply_transfer's
@@ -102,8 +133,17 @@
 
   <div class="card stack">
     <div class="field">
-      <label for="to">recipient (x-only pubkey, 64 hex chars)</label>
-      <input id="to" class="mono" type="text" bind:value={to} />
+      <label for="to">recipient (bech32m L2 address)</label>
+      <input
+        id="to"
+        class="mono"
+        type="text"
+        placeholder="hc1… / thc1… / hcrt1…"
+        bind:value={to}
+      />
+      {#if addrError}
+        <small class="error small">{addrError}</small>
+      {/if}
     </div>
     <div class="field">
       <label for="amount">amount (atoms)</label>

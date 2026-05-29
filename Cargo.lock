@@ -1621,6 +1621,7 @@ checksum = "3011d1213f159867b13cfd6ac92d2cd5f1345762c63be3554e84092d85a50bbd"
 name = "hodl-core"
 version = "0.1.2"
 dependencies = [
+ "bech32",
  "bitcoin",
  "hex",
  "libm",

@@ -377,7 +377,31 @@ async fn get_witness(
     }
 }
 
+/// Parse an x-only pubkey from either bech32m (`hc1…` / `thc1…` /
+/// `hcrt1…`) or raw 64-char hex.
+///
+/// Hex stays for two reasons: it's what the wallet→sequencer HTTP
+/// client (`hodl_wallet::api`) emits internally, and any tooling that
+/// predates the bech32m migration keeps working. Bech32m is added as
+/// a friendly form for humans hitting `/balance/<addr>` directly with
+/// curl, which is what the regtest demo and ad-hoc debugging use.
+///
+/// Network class is not checked here: the route doesn't carry the
+/// sequencer's configured network so it can't enforce HRP↔network
+/// agreement; the wallet is the right place for that check.
 fn parse_xonly(s: &str) -> anyhow::Result<XOnlyPublicKey> {
+    // Detect bech32m by the `1` separator + an `hc`/`thc`/`hcrt` HRP.
+    // Anything else falls through to hex parsing for backward compat.
+    let lower = s.to_ascii_lowercase();
+    let looks_bech32m = matches!(
+        lower.split_once('1'),
+        Some(("hc", _)) | Some(("thc", _)) | Some(("hcrt", _))
+    );
+    if looks_bech32m {
+        let (pk, _class) = hodl_core::address::decode(s)
+            .map_err(|e| anyhow::anyhow!("bech32m decode failed: {e}"))?;
+        return Ok(pk);
+    }
     let bytes = hex::decode(s)?;
     Ok(XOnlyPublicKey::from_slice(&bytes)?)
 }

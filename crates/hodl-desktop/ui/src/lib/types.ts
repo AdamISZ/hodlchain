@@ -31,7 +31,7 @@ export interface KeygenInput {
 }
 
 export interface KeygenOutput {
-  l2_address: string;     // x-only pubkey, 32-byte hex
+  l2_address: string;     // bech32m: hc1… (mainnet) / thc1… (test/signet) / hcrt1… (regtest)
   mnemonic: string;       // BIP39 phrase (echoed back)
   was_fresh: boolean;     // true = newly generated, false = restored from input
 }
@@ -106,7 +106,8 @@ export interface TxRecord {
   fee_atoms?: number | null;
   /** L1 reclaim miner fee in sat, if applicable. */
   fee_sat?: number | null;
-  /** Address or hex pubkey of the "other side" of the tx. */
+  /** Address of the "other side" of the tx: bech32m L1 address (L1
+   * records) or bech32m L2 address (L2 records). */
   counterparty?: string | null;
   status: TxStatus;
   l1_txid?: string | null;

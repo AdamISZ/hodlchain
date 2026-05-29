@@ -19,6 +19,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use bip39::Mnemonic;
 use bitcoin::secp256k1::{Message, Secp256k1, XOnlyPublicKey};
 use bitcoin::{Address, OutPoint, Txid};
+use hodl_core::address;
 use hodl_core::consensus::MAX_LOCK_BLOCKS;
 use hodl_core::hash::H256;
 use hodl_core::l1::mint_address;
@@ -271,7 +272,9 @@ pub struct KeygenInput {
 
 #[derive(Clone, Debug, Serialize)]
 pub struct KeygenOutput {
-    pub l2_address: XOnlyPublicKey,
+    /// Bech32m-encoded L2 address for the wallet's network. HRP is
+    /// `hc` on mainnet, `thc` on testnet/signet, `hcrt` on regtest.
+    pub l2_address: String,
     /// The wallet's BIP39 mnemonic. Echoed back so UIs can display
     /// it once for backup (fresh wallets) or simply confirm the
     /// caller-supplied phrase was accepted (restored wallets).
@@ -315,7 +318,7 @@ pub fn keygen(wallet_path: &Path, input: KeygenInput) -> Result<KeygenOutput> {
     wf.save(wallet_path)?;
     let l2_address = wf.l2_identity_xonly(&secp)?;
     Ok(KeygenOutput {
-        l2_address,
+        l2_address: address::encode(&l2_address, wf.network),
         mnemonic: phrase,
         was_fresh,
     })
@@ -570,9 +573,10 @@ pub struct MintMessageInput {
     /// MintRecord whose funding has been observed (use
     /// `check_mint_funding` first).
     pub bip32_index: u32,
-    /// Optional L2 destination address. Defaults to the wallet's
-    /// own L2 identity.
-    pub to: Option<XOnlyPublicKey>,
+    /// Optional L2 destination address (bech32m). Defaults to the
+    /// wallet's own L2 identity. Must encode for the same network
+    /// class (mainnet / testnet+signet / regtest) as the wallet.
+    pub to: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -604,7 +608,12 @@ pub async fn mint_message(wallet_path: &Path, input: MintMessageInput) -> Result
         )
     })?;
     let outpoint: OutPoint = parse_outpoint(outpoint_s)?;
-    let l2_destination = input.to.unwrap_or(l2_identity);
+    let l2_destination = match input.to {
+        Some(s) => address::decode_for(&s, wf.network).with_context(|| {
+            format!("decode --to address {s:?} as bech32m L2 address")
+        })?,
+        None => l2_identity,
+    };
 
     // Sign the mint message with the L1 mint key that the mint UTXO
     // commits to (via `user_pk` in L_spend). The signed message
@@ -644,7 +653,7 @@ pub async fn mint_message(wallet_path: &Path, input: MintMessageInput) -> Result
             amount: resp.mint_amount.unwrap_or(0),
             fee_atoms: None,
             fee_sat: None,
-            counterparty: Some(hex::encode(l2_destination.serialize())),
+            counterparty: Some(address::encode(&l2_destination, wf.network)),
             status: TxStatus::Soft { since_ts: now_ts() },
             l1_txid: None,
             l2_sighash: resp.nullifier_hex.clone(),
@@ -660,7 +669,7 @@ pub async fn mint_message(wallet_path: &Path, input: MintMessageInput) -> Result
             amount: 0,
             fee_atoms: None,
             fee_sat: None,
-            counterparty: Some(hex::encode(l2_destination.serialize())),
+            counterparty: Some(address::encode(&l2_destination, wf.network)),
             status: TxStatus::Failed {
                 reason: resp
                     .error
@@ -688,7 +697,10 @@ pub async fn mint_message(wallet_path: &Path, input: MintMessageInput) -> Result
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct TransferInput {
-    pub to: XOnlyPublicKey,
+    /// Bech32m-encoded destination address. Must encode for the same
+    /// network class as the wallet — a hex string or wrong-HRP
+    /// address is rejected with a typed error.
+    pub to: String,
     pub amount: u64,
 }
 
@@ -720,6 +732,9 @@ pub async fn transfer(wallet_path: &Path, input: TransferInput) -> Result<Transf
     let secp = Secp256k1::new();
     let kp = wf.l2_identity_keypair(&secp)?;
     let from = wf.l2_identity_xonly(&secp)?;
+    let to = address::decode_for(&input.to, wf.network).with_context(|| {
+        format!("decode transfer destination {:?} as bech32m L2 address", input.to)
+    })?;
     let api = ApiClient::new(wf.sequencer_url.clone(), wf.node_url.clone());
     // Use `effective_nonce` from the *sequencer* (not the node):
     // it accounts for any of our own transfers still sitting in
@@ -728,7 +743,7 @@ pub async fn transfer(wallet_path: &Path, input: TransferInput) -> Result<Transf
     let bal = api.balance_via_sequencer(&from).await?;
     let body = TransferBody {
         from,
-        to: input.to,
+        to,
         amount: input.amount,
         nonce: bal.effective_nonce,
     };
@@ -739,7 +754,7 @@ pub async fn transfer(wallet_path: &Path, input: TransferInput) -> Result<Transf
     let resp = api.submit_transfer(signed).await?;
     let fee = compute_transfer_fee(input.amount);
 
-    let counterparty = hex::encode(input.to.serialize());
+    let counterparty = address::encode(&to, wf.network);
     let sighash_hex = hex::encode(sighash_bytes);
     if resp.accepted {
         wf.append_tx(TxRecord {
@@ -793,12 +808,14 @@ pub async fn transfer(wallet_path: &Path, input: TransferInput) -> Result<Transf
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct BalanceInput {
-    pub addr: Option<XOnlyPublicKey>,
+    /// Optional bech32m address to query. Defaults to the wallet's own.
+    pub addr: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
 pub struct BalanceOutput {
-    pub address: XOnlyPublicKey,
+    /// Bech32m-encoded for the wallet's network.
+    pub address: String,
     pub balance: u64,
     pub nonce: u64,
 }
@@ -818,13 +835,14 @@ pub async fn balance(wallet_path: &Path, input: BalanceInput) -> Result<BalanceO
     let wf = WalletFile::load(wallet_path)?;
     let secp = Secp256k1::new();
     let target = match input.addr {
-        Some(a) => a,
+        Some(s) => address::decode_for(&s, wf.network)
+            .with_context(|| format!("decode --addr {s:?} as bech32m L2 address"))?,
         None => wf.xonly_pubkey(&secp)?,
     };
     let api = ApiClient::new(wf.sequencer_url.clone(), wf.node_url.clone());
     let bal = api.balance_via_sequencer(&target).await?;
     Ok(BalanceOutput {
-        address: target,
+        address: address::encode(&target, wf.network),
         balance: bal.balance,
         nonce: bal.nonce,
     })
@@ -834,7 +852,8 @@ pub async fn balance(wallet_path: &Path, input: BalanceInput) -> Result<BalanceO
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct VerifyBalanceInput {
-    pub addr: Option<XOnlyPublicKey>,
+    /// Optional bech32m address to query. Defaults to the wallet's own.
+    pub addr: Option<String>,
     /// Optional externally-supplied state_root to compare against
     /// (e.g. one walked off L1). When supplied, the verification also
     /// checks `state_root == against`.
@@ -843,7 +862,8 @@ pub struct VerifyBalanceInput {
 
 #[derive(Clone, Debug, Serialize)]
 pub struct VerifyBalanceOutput {
-    pub address: XOnlyPublicKey,
+    /// Bech32m-encoded for the wallet's network.
+    pub address: String,
     pub balance: u64,
     pub nonce: u64,
     pub l2_height: u32,
@@ -855,7 +875,8 @@ pub async fn verify_balance(wallet_path: &Path, input: VerifyBalanceInput) -> Re
     let wf = WalletFile::load(wallet_path)?;
     let secp = Secp256k1::new();
     let target = match input.addr {
-        Some(a) => a,
+        Some(s) => address::decode_for(&s, wf.network)
+            .with_context(|| format!("decode --addr {s:?} as bech32m L2 address"))?,
         None => wf.xonly_pubkey(&secp)?,
     };
     let api = ApiClient::new(wf.sequencer_url.clone(), wf.node_url.clone());
@@ -886,8 +907,8 @@ pub async fn verify_balance(wallet_path: &Path, input: VerifyBalanceInput) -> Re
     if bal.proof.address != bal.address {
         bail!(
             "proof address {} disagrees with response address {}",
-            hex::encode(bal.proof.address.serialize()),
-            hex::encode(bal.address.serialize())
+            address::encode(&bal.proof.address, wf.network),
+            address::encode(&bal.address, wf.network)
         );
     }
     if !bal.proof.verify(bal.state_components.accounts_root) {
@@ -924,7 +945,7 @@ pub async fn verify_balance(wallet_path: &Path, input: VerifyBalanceInput) -> Re
     }
 
     Ok(VerifyBalanceOutput {
-        address: target,
+        address: address::encode(&target, wf.network),
         balance: bal.balance,
         nonce: bal.nonce,
         l2_height: bal.l2_height,
@@ -982,7 +1003,8 @@ pub async fn light_head(wallet_path: &Path) -> Result<LightHeadOutput> {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct LightBalanceInput {
-    pub addr: Option<XOnlyPublicKey>,
+    /// Optional bech32m address to query. Defaults to the wallet's own.
+    pub addr: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -1006,7 +1028,8 @@ pub struct LightBalanceOutput {
     pub accounts_root: H256,
     pub block_hash: H256,
     pub l1_height: u32,
-    pub address: XOnlyPublicKey,
+    /// Bech32m-encoded for the wallet's network.
+    pub address: String,
     pub balance: u64,
     pub nonce: u64,
     pub is_own_address: bool,
@@ -1019,7 +1042,11 @@ pub async fn light_balance(wallet_path: &Path, input: LightBalanceInput) -> Resu
     let mut wf = WalletFile::load(wallet_path)?;
     let secp = Secp256k1::new();
     let own_addr = wf.xonly_pubkey(&secp)?;
-    let target = input.addr.unwrap_or(own_addr);
+    let target = match input.addr {
+        Some(s) => address::decode_for(&s, wf.network)
+            .with_context(|| format!("decode --addr {s:?} as bech32m L2 address"))?,
+        None => own_addr,
+    };
 
     let esplora = EsploraClient::new(wf.esplora_url.clone());
     let api = ApiClient::new(wf.sequencer_url.clone(), wf.node_url.clone());
@@ -1029,7 +1056,7 @@ pub async fn light_balance(wallet_path: &Path, input: LightBalanceInput) -> Resu
             bail!(
                 "persisted verified_head tracks a different address ({}); \
                  wallet key may have changed",
-                hex::encode(h.own_address.serialize())
+                address::encode(&h.own_address, wf.network)
             );
         }
     }
@@ -1113,7 +1140,7 @@ pub async fn light_balance(wallet_path: &Path, input: LightBalanceInput) -> Resu
         accounts_root: head.accounts_root,
         block_hash: head.block_hash,
         l1_height: head.l1_height,
-        address: target,
+        address: address::encode(&target, wf.network),
         balance,
         nonce,
         is_own_address: target == own_addr,

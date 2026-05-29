@@ -5,8 +5,7 @@
 //! in this file; if you find yourself reaching past `ops` for the
 //! `api` / `bitcoind` / `verify` modules directly, refactor it.
 
-use anyhow::{anyhow, Context, Result};
-use bitcoin::secp256k1::XOnlyPublicKey;
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use hodl_core::hash::H256;
 use hodl_wallet::ops::{self, LightBalanceMode, MintFundingState, ReclaimStatus};
@@ -116,14 +115,15 @@ struct MintMessageArgs {
     /// `mint-watch`.
     #[arg(long)]
     bip32_index: u32,
-    /// L2 destination x-only pubkey hex. Defaults to our own address.
+    /// L2 destination address (bech32m, e.g. `hc1…` / `thc1…` / `hcrt1…`).
+    /// Defaults to our own address.
     #[arg(long)]
     to: Option<String>,
 }
 
 #[derive(clap::Args, Debug)]
 struct TransferArgs {
-    /// Destination L2 x-only pubkey hex.
+    /// Destination L2 address (bech32m, e.g. `hc1…` / `thc1…` / `hcrt1…`).
     #[arg(long)]
     to: String,
     /// Amount in L2 atoms.
@@ -133,14 +133,14 @@ struct TransferArgs {
 
 #[derive(clap::Args, Debug)]
 struct BalanceArgs {
-    /// Address to query (x-only pubkey hex). Defaults to our own address.
+    /// Address to query (bech32m). Defaults to our own address.
     #[arg(long)]
     addr: Option<String>,
 }
 
 #[derive(clap::Args, Debug)]
 struct LightBalanceArgs {
-    /// Address to query (x-only pubkey hex). Defaults to our own address.
+    /// Address to query (bech32m). Defaults to our own address.
     #[arg(long)]
     addr: Option<String>,
 }
@@ -161,7 +161,7 @@ struct ReclaimArgs {
 
 #[derive(clap::Args, Debug)]
 struct VerifyBalanceArgs {
-    /// Address to query (x-only pubkey hex). Defaults to our own address.
+    /// Address to query (bech32m). Defaults to our own address.
     #[arg(long)]
     addr: Option<String>,
     /// Optional 32-byte hex state_root to compare against.
@@ -216,7 +216,7 @@ fn cmd_keygen(wallet_path: &std::path::Path, args: KeygenArgs) -> Result<()> {
         },
     )?;
     println!("wrote {}", wallet_path.display());
-    println!("L2 address: {}", hex::encode(out.l2_address.serialize()));
+    println!("L2 address: {}", out.l2_address);
     println!();
     if out.was_fresh {
         println!("BIP39 mnemonic (24 words) — back this up:");
@@ -228,8 +228,12 @@ fn cmd_keygen(wallet_path: &std::path::Path, args: KeygenArgs) -> Result<()> {
 }
 
 fn cmd_address(wallet_path: &std::path::Path) -> Result<()> {
+    // Print the bech32m-encoded form so the printed value can be
+    // pasted verbatim into a `--to` / `--addr` argument.
+    use hodl_core::address;
+    let wf = hodl_wallet::wallet::WalletFile::load(wallet_path)?;
     let addr = ops::address(wallet_path)?;
-    println!("{}", hex::encode(addr.serialize()));
+    println!("{}", address::encode(&addr, wf.network));
     Ok(())
 }
 
@@ -313,12 +317,11 @@ fn cmd_list_mints(wallet_path: &std::path::Path) -> Result<()> {
 }
 
 async fn cmd_mint_message(wallet_path: &std::path::Path, args: MintMessageArgs) -> Result<()> {
-    let to = args.to.map(|s| parse_xonly(&s)).transpose()?;
     let out = ops::mint_message(
         wallet_path,
         ops::MintMessageInput {
             bip32_index: args.bip32_index,
-            to,
+            to: args.to,
         },
     )
     .await?;
@@ -340,11 +343,10 @@ async fn cmd_mint_message(wallet_path: &std::path::Path, args: MintMessageArgs) 
 }
 
 async fn cmd_transfer(wallet_path: &std::path::Path, args: TransferArgs) -> Result<()> {
-    let to = parse_xonly(&args.to)?;
     let out = ops::transfer(
         wallet_path,
         ops::TransferInput {
-            to,
+            to: args.to,
             amount: args.amount,
         },
     )
@@ -367,23 +369,25 @@ async fn cmd_transfer(wallet_path: &std::path::Path, args: TransferArgs) -> Resu
 }
 
 async fn cmd_balance(wallet_path: &std::path::Path, args: BalanceArgs) -> Result<()> {
-    let addr = args.addr.map(|s| parse_xonly(&s)).transpose()?;
-    let out = ops::balance(wallet_path, ops::BalanceInput { addr }).await?;
-    println!("address: {}", hex::encode(out.address.serialize()));
+    let out = ops::balance(wallet_path, ops::BalanceInput { addr: args.addr }).await?;
+    println!("address: {}", out.address);
     println!("balance: {} atoms", out.balance);
     println!("nonce:   {}", out.nonce);
     Ok(())
 }
 
 async fn cmd_verify_balance(wallet_path: &std::path::Path, args: VerifyBalanceArgs) -> Result<()> {
-    let addr = args.addr.map(|s| parse_xonly(&s)).transpose()?;
     let against = args
         .against
         .map(|s| H256::from_hex(&s).context("parse --against hex"))
         .transpose()?;
-    let out = ops::verify_balance(wallet_path, ops::VerifyBalanceInput { addr, against }).await?;
+    let out = ops::verify_balance(
+        wallet_path,
+        ops::VerifyBalanceInput { addr: args.addr, against },
+    )
+    .await?;
     println!("verified");
-    println!("  address:     {}", hex::encode(out.address.serialize()));
+    println!("  address:     {}", out.address);
     println!("  balance:     {} atoms", out.balance);
     println!("  nonce:       {}", out.nonce);
     println!("  l2_height:   {}", out.l2_height);
@@ -416,8 +420,7 @@ async fn cmd_light_head(wallet_path: &std::path::Path) -> Result<()> {
 }
 
 async fn cmd_light_balance(wallet_path: &std::path::Path, args: LightBalanceArgs) -> Result<()> {
-    let addr = args.addr.map(|s| parse_xonly(&s)).transpose()?;
-    let out = ops::light_balance(wallet_path, ops::LightBalanceInput { addr }).await?;
+    let out = ops::light_balance(wallet_path, ops::LightBalanceInput { addr: args.addr }).await?;
     let mode_label = match out.mode {
         LightBalanceMode::ColdStart => "cold-start",
         LightBalanceMode::WarmStart => "warm-start",
@@ -436,7 +439,7 @@ async fn cmd_light_balance(wallet_path: &std::path::Path, args: LightBalanceArgs
     } else {
         "address:         "
     };
-    println!("  {} {}", label, hex::encode(out.address.serialize()));
+    println!("  {} {}", label, out.address);
     println!("  balance:          {} atoms", out.balance);
     println!("  nonce:            {}", out.nonce);
     Ok(())
@@ -490,8 +493,3 @@ async fn cmd_reclaim(wallet_path: &std::path::Path, args: ReclaimArgs) -> Result
     Ok(())
 }
 
-fn parse_xonly(s: &str) -> Result<XOnlyPublicKey> {
-    let bytes = hex::decode(s).context("decode pubkey hex")?;
-    XOnlyPublicKey::from_slice(&bytes)
-        .map_err(|_| anyhow!("invalid x-only pubkey hex"))
-}

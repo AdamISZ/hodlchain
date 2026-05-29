@@ -30,3 +30,4 @@ docs/*.tex
 # not appropriate for publication (refers to maintainer by name,
 # documents internal flow). Keep on disk, do not push.
 docs/release.md
+docs/gui-review-plan.md

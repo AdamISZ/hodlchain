@@ -6,10 +6,9 @@
   // - "copy" button writes it to clipboard
   // - "QR" button toggles an inline SVG QR code below
   //
-  // Used for the L1 deposit address (most important — long bech32m
-  // strings are very error-prone to retype), the L2 x-only pubkey
-  // address shown after wallet creation / on the dashboard, and the
-  // reclaim outpoint address in the reclaim list.
+  // Used for the L1 deposit address, the bech32m L2 address shown
+  // after wallet creation / on the dashboard, and the reclaim outpoint
+  // address in the reclaim list.
 
   type Props = {
     value: string;

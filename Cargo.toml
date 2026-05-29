@@ -34,6 +34,10 @@ hodl-core = { path = "crates/hodl-core" }
 # Bitcoin. `default-features = false` so hodl-core can compile under
 # its no_std feature; daemons re-enable via the std feature.
 bitcoin = { version = "0.32", default-features = false, features = ["serde"] }
+# Bech32m encoding for L2 addresses (hc1.../thc1.../hcrt1...). Already
+# pulled in transitively by `bitcoin`; pinned here so the L2-address
+# module compiles against a known version.
+bech32 = "0.11"
 bitcoincore-rpc = "0.19"
 secp256k1 = { version = "0.29", default-features = false, features = ["serde", "alloc"] }
 # BIP39 mnemonic generation/parsing for the wallet. The bitcoin crate
