@@ -32,8 +32,13 @@ export const listWallets = (): Promise<string[]> => invoke("list_wallets");
 export const currentWallet = (): Promise<string | null> =>
   invoke("current_wallet");
 
-export const selectWallet = (name: string): Promise<void> =>
-  invoke("select_wallet", { name });
+export const selectWallet = (
+  name: string,
+  passphrase: string | null = null,
+): Promise<void> => invoke("select_wallet", { name, passphrase });
+
+export const isWalletEncrypted = (name: string): Promise<boolean> =>
+  invoke("is_wallet_encrypted", { name });
 
 export const deselectWallet = (): Promise<void> => invoke("deselect_wallet");
 

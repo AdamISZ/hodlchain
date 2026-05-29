@@ -28,6 +28,13 @@ export interface KeygenInput {
    */
   mnemonic?: string | null;
   force: boolean;
+  /**
+   * Optional passphrase for at-rest encryption. When non-empty, the
+   * wallet's mnemonic is wrapped (Argon2id + XChaCha20-Poly1305)
+   * before being written to disk (v2 schema). When null or "" the
+   * wallet is written plain (v1, legacy).
+   */
+  encryption_passphrase?: string | null;
 }
 
 export interface KeygenOutput {

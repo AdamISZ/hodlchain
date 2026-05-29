@@ -32,21 +32,37 @@ pub fn current_wallet(state: State<AppState>) -> Option<String> {
     state.current_wallet.lock().unwrap().clone()
 }
 
+/// Whether a wallet on disk is v2 encrypted. The picker calls this to
+/// decide whether to show a lock badge + open the passphrase dialog
+/// before selection.
 #[tauri::command]
-pub fn select_wallet(state: State<AppState>, name: String) -> Result<(), String> {
+pub fn is_wallet_encrypted(state: State<AppState>, name: String) -> Result<bool, String> {
     let path = err_to_string(wallets::wallet_path_for(&state.wallets_dir, &name))?;
     if !path.exists() {
-        return Err(format!("no wallet named {name:?} at {}", path.display()));
+        return Err(format!("no wallet named {name:?}"));
     }
-    *state.current_wallet.lock().unwrap() = Some(name);
-    Ok(())
+    err_to_string(hodl_wallet::wallet::WalletFile::is_encrypted_at(&path))
 }
 
-/// Forget the current selection. Used when the user picks "switch
-/// wallet" in the dashboard to return to the picker.
+/// Select a wallet by name. For an encrypted wallet, `passphrase` is
+/// required and is used once to derive the KEK; the context is then
+/// cached in AppState for the lifetime of the selection. For plain
+/// wallets, `passphrase` is ignored.
+#[tauri::command]
+pub fn select_wallet(
+    state: State<AppState>,
+    name: String,
+    passphrase: Option<String>,
+) -> Result<(), String> {
+    err_to_string(state.select(name, passphrase.as_deref()))
+}
+
+/// Forget the current selection AND evict its cached unlock context.
+/// Used when the user picks "switch wallet" in the dashboard to return
+/// to the picker.
 #[tauri::command]
 pub fn deselect_wallet(state: State<AppState>) {
-    *state.current_wallet.lock().unwrap() = None;
+    state.deselect();
 }
 
 // ---------- Keygen (creates a new named wallet) ----------
@@ -59,6 +75,13 @@ pub struct GuiKeygenInput {
     /// CLI's `--force` flag; without it we refuse to clobber.
     #[serde(default)]
     pub force: bool,
+    /// Optional passphrase. When `Some(non-empty)`, the wallet's
+    /// mnemonic is encrypted at rest (v2 on-disk format) and the
+    /// AppState caches the derived unlock context so subsequent ops
+    /// don't re-prompt. When `None` or `Some("")`, the wallet is
+    /// written plain (v1). See plan H3.
+    #[serde(default)]
+    pub encryption_passphrase: Option<String>,
     #[serde(flatten)]
     pub keygen: ops::KeygenInput,
 }
@@ -75,8 +98,20 @@ pub fn keygen(
             path.display()
         ));
     }
-    let (wf, out) = err_to_string(ops::keygen(input.keygen))?;
-    err_to_string(wf.save(&path))?;
+    let (mut wf, out) = err_to_string(ops::keygen(input.keygen))?;
+    if let Some(pp) = input.encryption_passphrase.as_deref().filter(|s| !s.is_empty()) {
+        err_to_string(wf.encrypt_in_place(pp))?;
+        // Save while encryption_ctx is still on the WalletFile so the
+        // v2 disk shape is emitted. Then move the same context into
+        // the AppState cache so subsequent ops on this newly-created
+        // wallet don't re-prompt.
+        err_to_string(wf.save(&path))?;
+        if let Some(ctx) = wf.take_encryption_ctx() {
+            state.unlocked.lock().unwrap().insert(input.name.clone(), ctx);
+        }
+    } else {
+        err_to_string(wf.save(&path))?;
+    }
     // Make the newly-created wallet the active one — saves the user
     // a separate "select" step right after setup.
     *state.current_wallet.lock().unwrap() = Some(input.name);

@@ -12,6 +12,22 @@ use hodl_wallet::ops::{self, LightBalanceMode, MintFundingState, ReclaimStatus};
 use hodl_wallet::wallet::{network_from_str, WalletFile, DEFAULT_WALLET_PATH};
 use std::path::{Path, PathBuf};
 
+/// Load a wallet from disk, transparently prompting for a passphrase
+/// (via `rpassword`) when the wallet is v2 encrypted. Used by every
+/// non-keygen subcommand. Keygen itself always creates plain v1 files
+/// — CLI doesn't currently offer an encrypted-wallet creation path
+/// (plan H3 keeps that GUI-only for now).
+fn load_wallet(path: &Path) -> Result<WalletFile> {
+    if WalletFile::is_encrypted_at(path)? {
+        let prompt = format!("Passphrase for {}: ", path.display());
+        let pp = rpassword::prompt_password(&prompt)
+            .context("read passphrase from terminal")?;
+        WalletFile::load_unlocked(path, Some(&pp))
+    } else {
+        WalletFile::load(path)
+    }
+}
+
 #[derive(Parser, Debug)]
 #[command(name = "hodl-wallet", version, about = "hodlchain POC wallet")]
 struct Cli {
@@ -234,14 +250,14 @@ fn cmd_address(wallet_path: &Path) -> Result<()> {
     // Print the bech32m-encoded form so the printed value can be
     // pasted verbatim into a `--to` / `--addr` argument.
     use hodl_core::address;
-    let wf = WalletFile::load(wallet_path)?;
+    let wf = load_wallet(wallet_path)?;
     let addr = ops::address(&wf)?;
     println!("{}", address::encode(&addr, wf.network));
     Ok(())
 }
 
 fn cmd_mint_utxo(wallet_path: &Path, args: MintUtxoArgs) -> Result<()> {
-    let mut wf = WalletFile::load(wallet_path)?;
+    let mut wf = load_wallet(wallet_path)?;
     let out = ops::mint_utxo(
         &mut wf,
         ops::MintUtxoInput {
@@ -260,7 +276,7 @@ fn cmd_mint_utxo(wallet_path: &Path, args: MintUtxoArgs) -> Result<()> {
 }
 
 async fn cmd_mint_watch(wallet_path: &Path, args: MintWatchArgs) -> Result<()> {
-    let mut wf = WalletFile::load(wallet_path)?;
+    let mut wf = load_wallet(wallet_path)?;
     let out = ops::check_mint_funding(
         &mut wf,
         ops::CheckMintFundingInput { bip32_index: args.bip32_index },
@@ -296,7 +312,7 @@ async fn cmd_mint_watch(wallet_path: &Path, args: MintWatchArgs) -> Result<()> {
 }
 
 fn cmd_list_mints(wallet_path: &Path) -> Result<()> {
-    let wf = WalletFile::load(wallet_path)?;
+    let wf = load_wallet(wallet_path)?;
     let mints = ops::list_mints(&wf);
     if mints.is_empty() {
         println!("(no recorded mints)");
@@ -325,7 +341,7 @@ fn cmd_list_mints(wallet_path: &Path) -> Result<()> {
 }
 
 async fn cmd_mint_message(wallet_path: &Path, args: MintMessageArgs) -> Result<()> {
-    let mut wf = WalletFile::load(wallet_path)?;
+    let mut wf = load_wallet(wallet_path)?;
     let out = ops::mint_message(
         &mut wf,
         ops::MintMessageInput {
@@ -353,7 +369,7 @@ async fn cmd_mint_message(wallet_path: &Path, args: MintMessageArgs) -> Result<(
 }
 
 async fn cmd_transfer(wallet_path: &Path, args: TransferArgs) -> Result<()> {
-    let mut wf = WalletFile::load(wallet_path)?;
+    let mut wf = load_wallet(wallet_path)?;
     let out = ops::transfer(
         &mut wf,
         ops::TransferInput {
@@ -381,7 +397,7 @@ async fn cmd_transfer(wallet_path: &Path, args: TransferArgs) -> Result<()> {
 }
 
 async fn cmd_balance(wallet_path: &Path, args: BalanceArgs) -> Result<()> {
-    let wf = WalletFile::load(wallet_path)?;
+    let wf = load_wallet(wallet_path)?;
     let out = ops::balance(&wf, ops::BalanceInput { addr: args.addr }).await?;
     println!("address: {}", out.address);
     println!("balance: {} atoms", out.balance);
@@ -394,7 +410,7 @@ async fn cmd_verify_balance(wallet_path: &Path, args: VerifyBalanceArgs) -> Resu
         .against
         .map(|s| H256::from_hex(&s).context("parse --against hex"))
         .transpose()?;
-    let wf = WalletFile::load(wallet_path)?;
+    let wf = load_wallet(wallet_path)?;
     let out = ops::verify_balance(
         &wf,
         ops::VerifyBalanceInput { addr: args.addr, against },
@@ -416,14 +432,14 @@ async fn cmd_verify_balance(wallet_path: &Path, args: VerifyBalanceArgs) -> Resu
 }
 
 async fn cmd_head(wallet_path: &Path) -> Result<()> {
-    let wf = WalletFile::load(wallet_path)?;
+    let wf = load_wallet(wallet_path)?;
     let head = ops::sequencer_head(&wf).await?;
     println!("{}", serde_json::to_string_pretty(&head)?);
     Ok(())
 }
 
 async fn cmd_light_head(wallet_path: &Path) -> Result<()> {
-    let wf = WalletFile::load(wallet_path)?;
+    let wf = load_wallet(wallet_path)?;
     let out = ops::light_head(&wf).await?;
     println!("L2 head (derived from L1 attestation chain via Esplora):");
     println!("  l2_height:  {}", out.l2_height);
@@ -436,7 +452,7 @@ async fn cmd_light_head(wallet_path: &Path) -> Result<()> {
 }
 
 async fn cmd_light_balance(wallet_path: &Path, args: LightBalanceArgs) -> Result<()> {
-    let mut wf = WalletFile::load(wallet_path)?;
+    let mut wf = load_wallet(wallet_path)?;
     let out = ops::light_balance(&mut wf, ops::LightBalanceInput { addr: args.addr }).await?;
     wf.save(wallet_path)?;
     let mode_label = match out.mode {
@@ -464,7 +480,7 @@ async fn cmd_light_balance(wallet_path: &Path, args: LightBalanceArgs) -> Result
 }
 
 async fn cmd_reclaim_list(wallet_path: &Path) -> Result<()> {
-    let wf = WalletFile::load(wallet_path)?;
+    let wf = load_wallet(wallet_path)?;
     let mints = ops::list_reclaimable_mints(&wf).await?;
     if mints.is_empty() {
         println!("(no recorded mints)");
@@ -495,7 +511,7 @@ async fn cmd_reclaim_list(wallet_path: &Path) -> Result<()> {
 }
 
 async fn cmd_reclaim(wallet_path: &Path, args: ReclaimArgs) -> Result<()> {
-    let mut wf = WalletFile::load(wallet_path)?;
+    let mut wf = load_wallet(wallet_path)?;
     let out = ops::reclaim_mint(
         &mut wf,
         ops::ReclaimMintInput {

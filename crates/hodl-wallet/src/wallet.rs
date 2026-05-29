@@ -33,7 +33,7 @@
 //! This is a hard break from any earlier `secret_key_hex` format.
 //! Old wallet files cannot be loaded; regenerate with `keygen`.
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use bip39::Mnemonic;
 use bitcoin::bip32::{DerivationPath, Xpriv};
 use bitcoin::secp256k1::{Keypair, Secp256k1, XOnlyPublicKey};
@@ -45,6 +45,8 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
 use std::str::FromStr;
+
+use crate::encryption::{self, EncryptedMnemonic, UnlockContext};
 
 pub use hodl_core::config::NetworkName;
 
@@ -69,17 +71,23 @@ pub const HODLCHAIN_PURPOSE: u32 = 0x484F444C;
 /// remove the foot-gun and is a sensible follow-up.
 pub const REORG_FINALITY_DEPTH: u32 = 2;
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+/// In-memory wallet representation. The on-disk JSON shape is
+/// produced/consumed by [`WalletFile::save`] / [`WalletFile::load`]
+/// (which route through versioned internal helper structs); this
+/// struct itself is **not** serde-derived. See plan H3 for the v1/v2
+/// schema split.
+#[derive(Clone, Debug)]
 pub struct WalletFile {
     pub network: NetworkName,
-    /// BIP39 mnemonic (24 words by default).
+    /// BIP39 mnemonic (24 words by default). Always plaintext in
+    /// memory — encrypted wallets decrypt at load time and re-encrypt
+    /// at save time via [`encryption_ctx`].
     pub mnemonic: String,
     /// L2 sequencer base URL — submit endpoint for mint messages
     /// and transfers.
     pub sequencer_url: String,
     /// Optional L2 follower (node) base URL — used for block/witness
     /// queries that the light verifier needs.
-    #[serde(skip_serializing_if = "Option::is_none", default)]
     pub node_url: Option<String>,
     /// Esplora HTTP base URL — *required*. Sole L1 data source for
     /// the wallet (the wallet never speaks bitcoind directly). Points
@@ -90,11 +98,8 @@ pub struct WalletFile {
     /// successful `mint-utxo` call. Per-mint keypair lookup goes via
     /// `MintRecord.bip32_index`, so the counter is just for monotonic
     /// allocation.
-    #[serde(default)]
     pub next_mint_index: u32,
-    #[serde(default)]
     pub mints: Vec<MintRecord>,
-    #[serde(skip_serializing_if = "Option::is_none", default)]
     pub verified_head: Option<VerifiedHead>,
     /// Append-only transaction history. Stored chronologically (oldest
     /// first); UIs reverse for display. Backed by a separate vec from
@@ -102,11 +107,97 @@ pub struct WalletFile {
     /// for the reclaim flow and TxRecord is purely a presentation/
     /// observability layer — they cross-reference via
     /// `MintRecord.bip32_index` and `TxRecord.bip32_index`.
-    ///
-    /// `#[serde(default)]` so wallets created before this field load
-    /// with an empty history.
-    #[serde(default)]
     pub transactions: Vec<TxRecord>,
+    /// `Some` when the wallet was loaded from (or is destined for)
+    /// the v2 encrypted on-disk format. Holds the KDF-derived key so
+    /// subsequent saves can re-encrypt without re-prompting. `None`
+    /// for plain v1 wallets.
+    pub(crate) encryption_ctx: Option<UnlockContext>,
+}
+
+// ---------- On-disk format ----------
+//
+// v1 (legacy plaintext) — no `version` field, mnemonic stored as a
+// bare string:
+//
+//   { "network": "...", "mnemonic": "abandon ...", "sequencer_url": ... }
+//
+// v2 (encrypted) — `version: 2`, mnemonic replaced by
+// `encrypted_mnemonic` blob:
+//
+//   { "version": 2, "network": "...",
+//     "encrypted_mnemonic": { kdf, kdf_params, salt_b64, nonce_b64,
+//                             ciphertext_b64 },
+//     "sequencer_url": ... }
+//
+// The Load struct accepts both shapes (both mnemonic fields optional);
+// load() then validates that exactly one is present and routes
+// accordingly. Save emits the right shape based on `encryption_ctx`.
+//
+// We duplicate the field list across DiskLoad / DiskSaveV1 /
+// DiskSaveV2 rather than flattening a common sub-struct so the JSON
+// field order on disk stays human-friendly (network first, mnemonic
+// or encrypted_mnemonic second, the rest after).
+
+#[derive(Deserialize)]
+struct DiskLoad {
+    #[serde(default)]
+    version: Option<u32>,
+    network: NetworkName,
+    #[serde(default)]
+    mnemonic: Option<String>,
+    #[serde(default)]
+    encrypted_mnemonic: Option<EncryptedMnemonic>,
+    sequencer_url: String,
+    #[serde(default)]
+    node_url: Option<String>,
+    esplora_url: String,
+    #[serde(default)]
+    next_mint_index: u32,
+    #[serde(default)]
+    mints: Vec<MintRecord>,
+    #[serde(default)]
+    verified_head: Option<VerifiedHead>,
+    #[serde(default)]
+    transactions: Vec<TxRecord>,
+}
+
+#[derive(Serialize)]
+struct DiskSaveV1<'a> {
+    network: NetworkName,
+    mnemonic: &'a str,
+    sequencer_url: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    node_url: Option<&'a str>,
+    esplora_url: &'a str,
+    next_mint_index: u32,
+    mints: &'a [MintRecord],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    verified_head: Option<&'a VerifiedHead>,
+    transactions: &'a [TxRecord],
+}
+
+#[derive(Serialize)]
+struct DiskSaveV2<'a> {
+    version: u32,
+    network: NetworkName,
+    encrypted_mnemonic: &'a EncryptedMnemonic,
+    sequencer_url: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    node_url: Option<&'a str>,
+    esplora_url: &'a str,
+    next_mint_index: u32,
+    mints: &'a [MintRecord],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    verified_head: Option<&'a VerifiedHead>,
+    transactions: &'a [TxRecord],
+}
+
+fn read_disk(path: &Path) -> Result<DiskLoad> {
+    let s = fs::read_to_string(path)
+        .with_context(|| format!("read wallet file {}", path.display()))?;
+    serde_json::from_str(&s)
+        .with_context(|| format!("parse wallet file {}", path.display()))
 }
 
 pub fn network_from_str(s: &str) -> Result<NetworkName> {
@@ -329,20 +420,153 @@ pub fn now_ts() -> u64 {
 }
 
 impl WalletFile {
+    /// Load a plaintext (v1) wallet from disk. Errors if the file is
+    /// v2 encrypted — call [`load_unlocked`] with the passphrase
+    /// instead.
     pub fn load(path: &Path) -> Result<Self> {
-        let s = fs::read_to_string(path)
-            .with_context(|| format!("read wallet file {}", path.display()))?;
-        Ok(serde_json::from_str(&s)?)
+        let disk = read_disk(path)?;
+        Self::from_disk(disk, None)
+    }
+
+    /// Load any wallet. For v1 the `passphrase` is ignored. For v2
+    /// it's required and used to derive the KEK; the resulting
+    /// [`UnlockContext`] is held on `self.encryption_ctx` so a
+    /// subsequent [`save`] re-encrypts transparently.
+    pub fn load_unlocked(path: &Path, passphrase: Option<&str>) -> Result<Self> {
+        let disk = read_disk(path)?;
+        Self::from_disk(disk, passphrase)
+    }
+
+    /// Cheaply peek at a wallet file's on-disk shape to decide whether
+    /// a passphrase prompt is needed before loading. Reads + parses
+    /// the file but does no KDF work, so this is safe to call eagerly
+    /// from a picker UI.
+    pub fn is_encrypted_at(path: &Path) -> Result<bool> {
+        let disk = read_disk(path)?;
+        Ok(disk.encrypted_mnemonic.is_some())
+    }
+
+    /// Load an encrypted wallet using a cached unlock context (avoids
+    /// re-running Argon2id). The desktop side calls this on every IPC
+    /// command after the user has unlocked the wallet once. The
+    /// `ctx`'s salt + KDF params must match the on-disk values; a
+    /// mismatch errors loud rather than silently re-encrypting.
+    pub fn load_with_context(path: &Path, ctx: &UnlockContext) -> Result<Self> {
+        let disk = read_disk(path)?;
+        let blob = disk.encrypted_mnemonic.ok_or_else(|| {
+            anyhow!("load_with_context called on a non-encrypted wallet")
+        })?;
+        let mnemonic = ctx.decrypt(&blob)?;
+        Ok(WalletFile {
+            network: disk.network,
+            mnemonic,
+            sequencer_url: disk.sequencer_url,
+            node_url: disk.node_url,
+            esplora_url: disk.esplora_url,
+            next_mint_index: disk.next_mint_index,
+            mints: disk.mints,
+            verified_head: disk.verified_head,
+            transactions: disk.transactions,
+            encryption_ctx: Some(ctx.clone()),
+        })
+    }
+
+    /// Move the unlock context out of this `WalletFile` (used by the
+    /// desktop AppState when caching the context after a one-time
+    /// unlock). The wallet itself becomes a plain `WalletFile` from
+    /// that point — subsequent `save()`s would write v1 unless a new
+    /// context is set.
+    pub fn take_encryption_ctx(&mut self) -> Option<UnlockContext> {
+        self.encryption_ctx.take()
+    }
+
+    fn from_disk(disk: DiskLoad, passphrase: Option<&str>) -> Result<Self> {
+        let (mnemonic, encryption_ctx) = match (disk.encrypted_mnemonic, disk.mnemonic) {
+            (Some(_), _) if disk.version != Some(2) => bail!(
+                "wallet file has encrypted_mnemonic but version != 2 \
+                 (got {:?}); refusing to guess",
+                disk.version
+            ),
+            (Some(blob), _) => {
+                let pp = passphrase.ok_or_else(|| {
+                    anyhow!("wallet is encrypted; use load_unlocked() with the passphrase")
+                })?;
+                let (mn, ctx) = encryption::decrypt(&blob, pp)?;
+                (mn, Some(ctx))
+            }
+            (None, Some(mn)) => (mn, None),
+            (None, None) => bail!(
+                "wallet file has neither `mnemonic` (v1) nor `encrypted_mnemonic` (v2)"
+            ),
+        };
+        Ok(WalletFile {
+            network: disk.network,
+            mnemonic,
+            sequencer_url: disk.sequencer_url,
+            node_url: disk.node_url,
+            esplora_url: disk.esplora_url,
+            next_mint_index: disk.next_mint_index,
+            mints: disk.mints,
+            verified_head: disk.verified_head,
+            transactions: disk.transactions,
+            encryption_ctx,
+        })
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
         let tmp = path.with_extension("json.tmp");
-        let data = serde_json::to_vec_pretty(self)?;
+        let data = if let Some(ctx) = &self.encryption_ctx {
+            // v2: rotate the AEAD nonce (encryption::reencrypt does
+            // this), keep the salt + KDF params stable.
+            let blob = encryption::reencrypt(&self.mnemonic, ctx)?;
+            let v2 = DiskSaveV2 {
+                version: 2,
+                network: self.network,
+                encrypted_mnemonic: &blob,
+                sequencer_url: &self.sequencer_url,
+                node_url: self.node_url.as_deref(),
+                esplora_url: &self.esplora_url,
+                next_mint_index: self.next_mint_index,
+                mints: &self.mints,
+                verified_head: self.verified_head.as_ref(),
+                transactions: &self.transactions,
+            };
+            serde_json::to_vec_pretty(&v2)?
+        } else {
+            let v1 = DiskSaveV1 {
+                network: self.network,
+                mnemonic: &self.mnemonic,
+                sequencer_url: &self.sequencer_url,
+                node_url: self.node_url.as_deref(),
+                esplora_url: &self.esplora_url,
+                next_mint_index: self.next_mint_index,
+                mints: &self.mints,
+                verified_head: self.verified_head.as_ref(),
+                transactions: &self.transactions,
+            };
+            serde_json::to_vec_pretty(&v1)?
+        };
         fs::write(&tmp, &data)
             .with_context(|| format!("write wallet tmp file {}", tmp.display()))?;
         fs::rename(&tmp, path)
             .with_context(|| format!("rename {} -> {}", tmp.display(), path.display()))?;
         Ok(())
+    }
+
+    /// Switch this wallet to v2 encrypted-at-rest. Sets up the unlock
+    /// context so the next [`save`] writes the v2 format. No-op if
+    /// already encrypted with a context — caller should drop the
+    /// existing context first if a passphrase change is intended (not
+    /// supported yet).
+    pub fn encrypt_in_place(&mut self, passphrase: &str) -> Result<()> {
+        let (_, ctx) = encryption::encrypt_new(&self.mnemonic, passphrase)?;
+        self.encryption_ctx = Some(ctx);
+        Ok(())
+    }
+
+    /// Whether this wallet's on-disk form is (or will be) v2 encrypted.
+    pub fn is_encrypted(&self) -> bool {
+        self.encryption_ctx.is_some()
     }
 
     /// Parsed BIP39 mnemonic.
@@ -573,6 +797,7 @@ mod tests {
             mints: vec![],
             verified_head: None,
             transactions: vec![],
+            encryption_ctx: None,
         }
     }
 
@@ -705,8 +930,10 @@ mod tests {
 
     #[test]
     fn wallet_file_loads_with_empty_transactions_when_field_missing() {
+        use tempfile::tempdir;
         // Old wallets serialised before `transactions` existed must
-        // still load. The default attribute is what makes this work.
+        // still load. The serde `default` attribute on the disk
+        // representation is what makes this work.
         let old_json = r#"{
             "network": "regtest",
             "mnemonic": "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
@@ -715,7 +942,78 @@ mod tests {
             "next_mint_index": 0,
             "mints": []
         }"#;
-        let wf: WalletFile = serde_json::from_str(old_json).unwrap();
+        let dir = tempdir().unwrap();
+        let p = dir.path().join("legacy.json");
+        std::fs::write(&p, old_json).unwrap();
+        let wf = WalletFile::load(&p).unwrap();
         assert!(wf.transactions.is_empty());
+        assert!(!wf.is_encrypted());
+    }
+
+    #[test]
+    fn save_v1_then_load_roundtrips_a_plain_wallet() {
+        use tempfile::tempdir;
+        let dir = tempdir().unwrap();
+        let p = dir.path().join("plain.json");
+        let wf = make_test_wallet(NetworkName::Regtest);
+        wf.save(&p).unwrap();
+        // v1 on disk has no `version` field and stores mnemonic in plaintext.
+        let raw = std::fs::read_to_string(&p).unwrap();
+        assert!(!raw.contains("\"version\""));
+        assert!(raw.contains("\"mnemonic\""));
+        let back = WalletFile::load(&p).unwrap();
+        assert_eq!(back.mnemonic, wf.mnemonic);
+        assert!(!back.is_encrypted());
+    }
+
+    #[test]
+    fn encrypt_in_place_then_save_writes_v2_and_unlocks_roundtrip() {
+        use tempfile::tempdir;
+        let dir = tempdir().unwrap();
+        let p = dir.path().join("crypt.json");
+        let mut wf = make_test_wallet(NetworkName::Regtest);
+        let plaintext_mnemonic = wf.mnemonic.clone();
+        wf.encrypt_in_place("hunter2").unwrap();
+        wf.save(&p).unwrap();
+        // v2 on disk has `version: 2` and `encrypted_mnemonic`, NOT
+        // the plaintext mnemonic.
+        let raw = std::fs::read_to_string(&p).unwrap();
+        assert!(raw.contains("\"version\""));
+        assert!(raw.contains("\"encrypted_mnemonic\""));
+        assert!(!raw.contains(&plaintext_mnemonic));
+        // Plain load should error pointing at load_unlocked.
+        let err = WalletFile::load(&p).unwrap_err();
+        assert!(format!("{err:#}").contains("encrypted"));
+        assert!(WalletFile::is_encrypted_at(&p).unwrap());
+        // load_unlocked with the right passphrase recovers the mnemonic.
+        let back = WalletFile::load_unlocked(&p, Some("hunter2")).unwrap();
+        assert_eq!(back.mnemonic, plaintext_mnemonic);
+        assert!(back.is_encrypted());
+        // Wrong passphrase fails loud.
+        assert!(WalletFile::load_unlocked(&p, Some("hunter3")).is_err());
+        // No passphrase fails with a guidance message.
+        let err = WalletFile::load_unlocked(&p, None).unwrap_err();
+        assert!(format!("{err:#}").contains("encrypted"));
+    }
+
+    #[test]
+    fn re_save_an_unlocked_v2_wallet_rotates_the_nonce() {
+        use tempfile::tempdir;
+        let dir = tempdir().unwrap();
+        let p = dir.path().join("crypt.json");
+        let mut wf = make_test_wallet(NetworkName::Regtest);
+        wf.encrypt_in_place("pp").unwrap();
+        wf.save(&p).unwrap();
+        let raw1 = std::fs::read_to_string(&p).unwrap();
+        // Mutate something benign and re-save.
+        let mut wf2 = WalletFile::load_unlocked(&p, Some("pp")).unwrap();
+        wf2.next_mint_index = 7;
+        wf2.save(&p).unwrap();
+        let raw2 = std::fs::read_to_string(&p).unwrap();
+        // The salt and KDF params should be stable; the nonce +
+        // ciphertext must change.
+        assert!(raw1.contains("\"salt_b64\""));
+        assert!(raw2.contains("\"salt_b64\""));
+        assert_ne!(raw1, raw2);
     }
 }

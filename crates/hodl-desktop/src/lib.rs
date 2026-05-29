@@ -36,6 +36,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::list_wallets,
             commands::current_wallet,
+            commands::is_wallet_encrypted,
             commands::select_wallet,
             commands::deselect_wallet,
             commands::keygen,

@@ -312,6 +312,7 @@ pub fn keygen(input: KeygenInput) -> Result<(WalletFile, KeygenOutput)> {
         mints: Vec::new(),
         verified_head: None,
         transactions: Vec::new(),
+        encryption_ctx: None,
     };
     let l2_address = wf.l2_identity_xonly(&secp)?;
     let out = KeygenOutput {

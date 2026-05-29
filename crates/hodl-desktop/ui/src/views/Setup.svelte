@@ -20,6 +20,15 @@
   let esploraUrl = $state("http://127.0.0.1:28081");
   let restorePhrase = $state("");
 
+  // At-rest encryption. Default to encrypted; unencrypted is always
+  // available but never the default (plan H3). The passphrase is
+  // never persisted — only the derived 32-byte key is, in process
+  // memory, until the user switches wallets.
+  type Encryption = "encrypted" | "unencrypted";
+  let encryption = $state<Encryption>("encrypted");
+  let passphrase = $state("");
+  let passphraseConfirm = $state("");
+
   // Mainnet gate. The POC is experimental and routing real BTC through
   // it is a foot-gun, so by default the network selector hides the
   // `bitcoin` option entirely. A maintainer building a release that
@@ -52,7 +61,15 @@
     mode === "create" || [12, 15, 18, 21, 24].includes(phraseWordCount),
   );
 
-  let canSubmit = $derived(!busy && nameOk && phraseOk);
+  // Encryption gating. When the user picks "encrypted", both fields
+  // must be non-empty and match. The backend re-validates non-empty
+  // before encrypting; the matching check is purely client-side UX.
+  let encryptionOk = $derived(
+    encryption === "unencrypted" ||
+      (passphrase.length > 0 && passphrase === passphraseConfirm),
+  );
+
+  let canSubmit = $derived(!busy && nameOk && phraseOk && encryptionOk);
 
   async function submit() {
     err = null;
@@ -66,6 +83,7 @@
         esplora_url: esploraUrl,
         mnemonic: mode === "restore" ? restorePhrase.trim() : null,
         force: false,
+        encryption_passphrase: encryption === "encrypted" ? passphrase : null,
       });
       mnemonic = out.mnemonic;
       wasFresh = out.was_fresh;
@@ -172,6 +190,55 @@
           </small>
         {/if}
       </div>
+
+      <fieldset class="field mode-group">
+        <legend>encryption</legend>
+        <div class="row">
+          <label class="radio">
+            <input type="radio" bind:group={encryption} value="encrypted" />
+            encrypted (passphrase-protected)
+          </label>
+          <label class="radio">
+            <input type="radio" bind:group={encryption} value="unencrypted" />
+            unencrypted
+          </label>
+        </div>
+        {#if encryption === "encrypted"}
+          <div class="field">
+            <label for="pp">passphrase</label>
+            <input
+              id="pp"
+              type="password"
+              autocomplete="new-password"
+              bind:value={passphrase}
+            />
+          </div>
+          <div class="field">
+            <label for="pp2">confirm passphrase</label>
+            <input
+              id="pp2"
+              type="password"
+              autocomplete="new-password"
+              bind:value={passphraseConfirm}
+            />
+            <small class="muted">
+              {#if passphrase.length === 0}
+                pick a passphrase you can remember — there's no recovery
+              {:else if passphrase !== passphraseConfirm}
+                passphrases don't match
+              {:else}
+                ✓ matches
+              {/if}
+            </small>
+          </div>
+        {:else}
+          <small class="muted">
+            the BIP39 mnemonic will be stored in plaintext on disk.
+            anyone with read access to <code>~/.config/hodlchain/wallets/</code>
+            (or the macOS / Windows equivalent) can recover the wallet.
+          </small>
+        {/if}
+      </fieldset>
 
       <div class="field">
         <label for="seq-url">sequencer URL</label>
