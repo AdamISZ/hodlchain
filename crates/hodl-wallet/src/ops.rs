@@ -29,7 +29,6 @@ use hodl_core::smt::LeafKind;
 use hodl_core::state::LedgerState;
 use hodl_core::tx::{SignedTransfer, TransferBody};
 use serde::{Deserialize, Serialize};
-use std::path::Path;
 use std::str::FromStr;
 
 use crate::api::ApiClient;
@@ -267,7 +266,6 @@ pub struct KeygenInput {
     /// wallet from a previously-backed-up phrase.
     #[serde(default)]
     pub mnemonic: Option<String>,
-    pub force: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -284,13 +282,13 @@ pub struct KeygenOutput {
     pub was_fresh: bool,
 }
 
-pub fn keygen(wallet_path: &Path, input: KeygenInput) -> Result<KeygenOutput> {
-    if wallet_path.exists() && !input.force {
-        bail!(
-            "wallet file {} already exists (set force=true to overwrite)",
-            wallet_path.display()
-        );
-    }
+/// Build a brand-new wallet from the supplied input. The caller is
+/// responsible for picking a target path, checking it doesn't already
+/// exist (or that overwrite is intended), and persisting the returned
+/// `WalletFile`. We split it this way so the path-aware concerns —
+/// existence checks, encryption choice — live entirely at the call
+/// site instead of leaking into the ops layer.
+pub fn keygen(input: KeygenInput) -> Result<(WalletFile, KeygenOutput)> {
     let secp = Secp256k1::new();
     let (phrase, was_fresh) = match input.mnemonic {
         Some(supplied) => {
@@ -315,19 +313,18 @@ pub fn keygen(wallet_path: &Path, input: KeygenInput) -> Result<KeygenOutput> {
         verified_head: None,
         transactions: Vec::new(),
     };
-    wf.save(wallet_path)?;
     let l2_address = wf.l2_identity_xonly(&secp)?;
-    Ok(KeygenOutput {
+    let out = KeygenOutput {
         l2_address: address::encode(&l2_address, wf.network),
         mnemonic: phrase,
         was_fresh,
-    })
+    };
+    Ok((wf, out))
 }
 
 // ---------- Address ----------
 
-pub fn address(wallet_path: &Path) -> Result<XOnlyPublicKey> {
-    let wf = WalletFile::load(wallet_path)?;
+pub fn address(wf: &WalletFile) -> Result<XOnlyPublicKey> {
     let secp = Secp256k1::new();
     wf.xonly_pubkey(&secp)
 }
@@ -353,14 +350,13 @@ pub struct MintUtxoOutput {
     pub mint_address: String,
 }
 
-pub fn mint_utxo(wallet_path: &Path, input: MintUtxoInput) -> Result<MintUtxoOutput> {
+pub fn mint_utxo(wf: &mut WalletFile, input: MintUtxoInput) -> Result<MintUtxoOutput> {
     if input.lock_blocks == 0 || input.lock_blocks > MAX_LOCK_BLOCKS {
         bail!(
             "lock_blocks must be in [1, {}] (BIP112 CSV block-form range)",
             MAX_LOCK_BLOCKS
         );
     }
-    let mut wf = WalletFile::load(wallet_path)?;
     let secp = Secp256k1::new();
     let network = wf.network.into_bitcoin();
     // Allocate a fresh BIP32-derived L1 mint key for this mint. Each
@@ -396,7 +392,6 @@ pub fn mint_utxo(wallet_path: &Path, input: MintUtxoInput) -> Result<MintUtxoOut
         minted: false,
         reclaimed: false,
     });
-    wf.save(wallet_path)?;
     Ok(MintUtxoOutput {
         bip32_index,
         lock_blocks: input.lock_blocks,
@@ -444,10 +439,9 @@ pub struct CheckMintFundingOutput {
 }
 
 pub async fn check_mint_funding(
-    wallet_path: &Path,
+    wf: &mut WalletFile,
     input: CheckMintFundingInput,
 ) -> Result<CheckMintFundingOutput> {
-    let mut wf = WalletFile::load(wallet_path)?;
     let record = wf
         .find_mint_by_index(input.bip32_index)
         .ok_or_else(|| anyhow!("no mint record with bip32_index {}", input.bip32_index))?
@@ -530,7 +524,6 @@ pub async fn check_mint_funding(
             });
         }
 
-        wf.save(wallet_path)?;
         (Some(outpoint_s), Some(u.value), height)
     } else {
         (Some(format!("{}:{}", u.txid, u.vout)), Some(u.value), None)
@@ -548,9 +541,8 @@ pub async fn check_mint_funding(
 
 // ---------- List Mints ----------
 
-pub fn list_mints(wallet_path: &Path) -> Result<Vec<MintRecord>> {
-    let wf = WalletFile::load(wallet_path)?;
-    Ok(wf.mints)
+pub fn list_mints(wf: &WalletFile) -> Vec<MintRecord> {
+    wf.mints.clone()
 }
 
 // ---------- List transaction history ----------
@@ -558,11 +550,10 @@ pub fn list_mints(wallet_path: &Path) -> Result<Vec<MintRecord>> {
 /// Return every persisted `TxRecord` in this wallet, **newest-first**.
 /// The wallet stores them in append order (oldest first); we reverse
 /// here so UIs can render the list directly without re-sorting.
-pub fn list_transactions(wallet_path: &Path) -> Result<Vec<TxRecord>> {
-    let wf = WalletFile::load(wallet_path)?;
-    let mut out = wf.transactions;
+pub fn list_transactions(wf: &WalletFile) -> Vec<TxRecord> {
+    let mut out = wf.transactions.clone();
     out.reverse();
-    Ok(out)
+    out
 }
 
 // ---------- Mint Message ----------
@@ -591,8 +582,7 @@ pub struct MintMessageOutput {
     pub soft_conf: Option<hodl_core::rpc::SoftConf>,
 }
 
-pub async fn mint_message(wallet_path: &Path, input: MintMessageInput) -> Result<MintMessageOutput> {
-    let mut wf = WalletFile::load(wallet_path)?;
+pub async fn mint_message(wf: &mut WalletFile, input: MintMessageInput) -> Result<MintMessageOutput> {
     let secp = Secp256k1::new();
     let l2_identity = wf.l2_identity_xonly(&secp)?;
     let record = wf
@@ -660,7 +650,6 @@ pub async fn mint_message(wallet_path: &Path, input: MintMessageInput) -> Result
             bip32_index: Some(input.bip32_index),
             note: None,
         });
-        wf.save(wallet_path)?;
     } else {
         wf.append_tx(TxRecord {
             id: new_tx_id(),
@@ -682,7 +671,6 @@ pub async fn mint_message(wallet_path: &Path, input: MintMessageInput) -> Result
             bip32_index: Some(input.bip32_index),
             note: None,
         });
-        wf.save(wallet_path)?;
     }
     Ok(MintMessageOutput {
         accepted: resp.accepted,
@@ -727,8 +715,7 @@ pub fn compute_transfer_fee(amount: u64) -> u64 {
     std::cmp::max(MIN_FEE, amount.saturating_mul(FEE_BPS) / 10_000)
 }
 
-pub async fn transfer(wallet_path: &Path, input: TransferInput) -> Result<TransferOutput> {
-    let mut wf = WalletFile::load(wallet_path)?;
+pub async fn transfer(wf: &mut WalletFile, input: TransferInput) -> Result<TransferOutput> {
     let secp = Secp256k1::new();
     let kp = wf.l2_identity_keypair(&secp)?;
     let from = wf.l2_identity_xonly(&secp)?;
@@ -793,7 +780,6 @@ pub async fn transfer(wallet_path: &Path, input: TransferInput) -> Result<Transf
             note: None,
         });
     }
-    wf.save(wallet_path)?;
 
     Ok(TransferOutput {
         accepted: resp.accepted,
@@ -831,8 +817,7 @@ pub struct BalanceOutput {
 /// default) caused the headline balance to lag by 1–2 L1 blocks —
 /// effectively the same value as the verified balance, which made
 /// the "SOFT" / "L1-confirmed" pill distinction in the GUI a lie.
-pub async fn balance(wallet_path: &Path, input: BalanceInput) -> Result<BalanceOutput> {
-    let wf = WalletFile::load(wallet_path)?;
+pub async fn balance(wf: &WalletFile, input: BalanceInput) -> Result<BalanceOutput> {
     let secp = Secp256k1::new();
     let target = match input.addr {
         Some(s) => address::decode_for(&s, wf.network)
@@ -871,8 +856,7 @@ pub struct VerifyBalanceOutput {
     pub bound_to_l1: bool,
 }
 
-pub async fn verify_balance(wallet_path: &Path, input: VerifyBalanceInput) -> Result<VerifyBalanceOutput> {
-    let wf = WalletFile::load(wallet_path)?;
+pub async fn verify_balance(wf: &WalletFile, input: VerifyBalanceInput) -> Result<VerifyBalanceOutput> {
     let secp = Secp256k1::new();
     let target = match input.addr {
         Some(s) => address::decode_for(&s, wf.network)
@@ -956,8 +940,7 @@ pub async fn verify_balance(wallet_path: &Path, input: VerifyBalanceInput) -> Re
 
 // ---------- Head ----------
 
-pub async fn sequencer_head(wallet_path: &Path) -> Result<HeadResponse> {
-    let wf = WalletFile::load(wallet_path)?;
+pub async fn sequencer_head(wf: &WalletFile) -> Result<HeadResponse> {
     let api = ApiClient::new(wf.sequencer_url.clone(), wf.node_url.clone());
     api.sequencer_head().await
 }
@@ -971,8 +954,7 @@ pub struct LightHeadOutput {
     pub attestations_walked: usize,
 }
 
-pub async fn light_head(wallet_path: &Path) -> Result<LightHeadOutput> {
-    let wf = WalletFile::load(wallet_path)?;
+pub async fn light_head(wf: &WalletFile) -> Result<LightHeadOutput> {
     let api = ApiClient::new(wf.sequencer_url.clone(), wf.node_url.clone());
     let esplora = EsploraClient::new(wf.esplora_url.clone());
 
@@ -1038,8 +1020,7 @@ pub struct LightBalanceOutput {
     pub total_minted_atoms: u64,
 }
 
-pub async fn light_balance(wallet_path: &Path, input: LightBalanceInput) -> Result<LightBalanceOutput> {
-    let mut wf = WalletFile::load(wallet_path)?;
+pub async fn light_balance(wf: &mut WalletFile, input: LightBalanceInput) -> Result<LightBalanceOutput> {
     let secp = Secp256k1::new();
     let own_addr = wf.xonly_pubkey(&secp)?;
     let target = match input.addr {
@@ -1079,7 +1060,7 @@ pub async fn light_balance(wallet_path: &Path, input: LightBalanceInput) -> Resu
     // covers inbound transfers, third-party mints to our address,
     // and cold-start backfills of our own past sends).
     if !events.is_empty() {
-        project_events(&mut wf, &events);
+        project_events(wf, &events);
     }
 
     // Late-stage status refresh: promote L1Mempool → InBlock for
@@ -1089,7 +1070,7 @@ pub async fn light_balance(wallet_path: &Path, input: LightBalanceInput) -> Resu
     // is the actual chain tip from Esplora (not head.l1_height,
     // which trails by up to one attestation cadence).
     let l1_tip = esplora.tip_height().await.unwrap_or(head.l1_height);
-    finalize_and_refresh(&mut wf, &esplora, l1_tip)
+    finalize_and_refresh(wf, &esplora, l1_tip)
         .await
         .context("late-stage status refresh")?;
 
@@ -1148,8 +1129,8 @@ pub async fn light_balance(wallet_path: &Path, input: LightBalanceInput) -> Resu
     };
 
     // Persist the (possibly-advanced) verified head before returning.
+    // Caller saves the WalletFile.
     wf.verified_head = Some(head);
-    wf.save(wallet_path)?;
     Ok(output)
 }
 
@@ -1185,8 +1166,7 @@ pub struct ReclaimableMint {
     pub blocks_remaining: Option<u32>,
 }
 
-pub async fn list_reclaimable_mints(wallet_path: &Path) -> Result<Vec<ReclaimableMint>> {
-    let wf = WalletFile::load(wallet_path)?;
+pub async fn list_reclaimable_mints(wf: &WalletFile) -> Result<Vec<ReclaimableMint>> {
     let esplora = EsploraClient::new(wf.esplora_url.clone());
 
     // Single L1-tip lookup, used for every CSV check below. Avoids a
@@ -1271,8 +1251,7 @@ pub struct ReclaimMintOutput {
     pub fee_sat: u64,
 }
 
-pub async fn reclaim_mint(wallet_path: &Path, input: ReclaimMintInput) -> Result<ReclaimMintOutput> {
-    let mut wf = WalletFile::load(wallet_path)?;
+pub async fn reclaim_mint(wf: &mut WalletFile, input: ReclaimMintInput) -> Result<ReclaimMintOutput> {
     let secp = Secp256k1::new();
     let network = wf.network.into_bitcoin();
 
@@ -1351,7 +1330,6 @@ pub async fn reclaim_mint(wallet_path: &Path, input: ReclaimMintInput) -> Result
         bip32_index: Some(input.bip32_index),
         note: None,
     });
-    wf.save(wallet_path)?;
 
     Ok(ReclaimMintOutput {
         txid,

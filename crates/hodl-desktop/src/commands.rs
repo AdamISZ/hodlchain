@@ -1,15 +1,18 @@
 //! `#[tauri::command]` wrappers. Each operation pulls the active
-//! wallet path from `AppState::current_wallet` and forwards to
-//! `hodl_wallet::ops::*`. The wallet-management commands
-//! (list/current/select + keygen) bypass that resolution because
-//! they operate on names instead of (or before) a selection.
+//! wallet path from `AppState::current_wallet`, loads the wallet, runs
+//! the requested `hodl_wallet::ops::*` against the parsed `WalletFile`,
+//! and (for mutating ops) saves it back. The ops layer no longer
+//! touches disk — all load/save plumbing lives here. The
+//! wallet-management commands (list/current/select + keygen) bypass
+//! the current-wallet resolution because they operate on names
+//! instead of (or before) a selection.
 //!
 //! anyhow errors become `String` so the frontend gets them via the
 //! standard Tauri invoke-rejection path.
 
 use crate::state::AppState;
 use hodl_core::address;
-use hodl_wallet::{ops, wallets, wallet::WalletFile};
+use hodl_wallet::{ops, wallets};
 use serde::Deserialize;
 use tauri::State;
 
@@ -52,6 +55,10 @@ pub fn deselect_wallet(state: State<AppState>) {
 pub struct GuiKeygenInput {
     /// Name to give the new wallet (`<name>.json` in the wallets dir).
     pub name: String,
+    /// Overwrite an existing file with the same name. Mirrors the
+    /// CLI's `--force` flag; without it we refuse to clobber.
+    #[serde(default)]
+    pub force: bool,
     #[serde(flatten)]
     pub keygen: ops::KeygenInput,
 }
@@ -62,7 +69,14 @@ pub fn keygen(
     input: GuiKeygenInput,
 ) -> Result<ops::KeygenOutput, String> {
     let path = err_to_string(wallets::wallet_path_for(&state.wallets_dir, &input.name))?;
-    let out = err_to_string(ops::keygen(&path, input.keygen))?;
+    if path.exists() && !input.force {
+        return Err(format!(
+            "wallet file {} already exists",
+            path.display()
+        ));
+    }
+    let (wf, out) = err_to_string(ops::keygen(input.keygen))?;
+    err_to_string(wf.save(&path))?;
     // Make the newly-created wallet the active one — saves the user
     // a separate "select" step right after setup.
     *state.current_wallet.lock().unwrap() = Some(input.name);
@@ -73,13 +87,8 @@ pub fn keygen(
 
 #[tauri::command]
 pub fn address(state: State<AppState>) -> Result<String, String> {
-    let path = err_to_string(state.resolve_current_path())?;
-    // Encode bech32m using the wallet's network. Loading WalletFile a
-    // second time (after ops::address already did) is a few hundred
-    // nanoseconds; doing the encode here keeps `ops::address` returning
-    // the raw XOnlyPublicKey for any internal caller that wants it.
-    let wf = err_to_string(WalletFile::load(&path))?;
-    let pk = err_to_string(ops::address(&path))?;
+    let wf = err_to_string(state.load_current())?;
+    let pk = err_to_string(ops::address(&wf))?;
     Ok(address::encode(&pk, wf.network))
 }
 
@@ -87,16 +96,16 @@ pub fn address(state: State<AppState>) -> Result<String, String> {
 pub fn list_mints(
     state: State<AppState>,
 ) -> Result<Vec<hodl_wallet::wallet::MintRecord>, String> {
-    let path = err_to_string(state.resolve_current_path())?;
-    err_to_string(ops::list_mints(&path))
+    let wf = err_to_string(state.load_current())?;
+    Ok(ops::list_mints(&wf))
 }
 
 #[tauri::command]
 pub fn list_transactions(
     state: State<AppState>,
 ) -> Result<Vec<hodl_wallet::wallet::TxRecord>, String> {
-    let path = err_to_string(state.resolve_current_path())?;
-    err_to_string(ops::list_transactions(&path))
+    let wf = err_to_string(state.load_current())?;
+    Ok(ops::list_transactions(&wf))
 }
 
 // ---------- Mints (L1 side) ----------
@@ -106,8 +115,10 @@ pub fn mint_utxo(
     state: State<AppState>,
     input: ops::MintUtxoInput,
 ) -> Result<ops::MintUtxoOutput, String> {
-    let path = err_to_string(state.resolve_current_path())?;
-    err_to_string(ops::mint_utxo(&path, input))
+    let mut wf = err_to_string(state.load_current())?;
+    let out = err_to_string(ops::mint_utxo(&mut wf, input))?;
+    err_to_string(state.save_current(&wf))?;
+    Ok(out)
 }
 
 #[tauri::command]
@@ -115,8 +126,10 @@ pub async fn check_mint_funding(
     state: State<'_, AppState>,
     input: ops::CheckMintFundingInput,
 ) -> Result<ops::CheckMintFundingOutput, String> {
-    let path = err_to_string(state.resolve_current_path())?;
-    err_to_string(ops::check_mint_funding(&path, input).await)
+    let mut wf = err_to_string(state.load_current())?;
+    let out = err_to_string(ops::check_mint_funding(&mut wf, input).await)?;
+    err_to_string(state.save_current(&wf))?;
+    Ok(out)
 }
 
 // ---------- Mint message + transfer (L2 side) ----------
@@ -126,8 +139,10 @@ pub async fn mint_message(
     state: State<'_, AppState>,
     input: ops::MintMessageInput,
 ) -> Result<ops::MintMessageOutput, String> {
-    let path = err_to_string(state.resolve_current_path())?;
-    err_to_string(ops::mint_message(&path, input).await)
+    let mut wf = err_to_string(state.load_current())?;
+    let out = err_to_string(ops::mint_message(&mut wf, input).await)?;
+    err_to_string(state.save_current(&wf))?;
+    Ok(out)
 }
 
 #[tauri::command]
@@ -135,8 +150,10 @@ pub async fn transfer(
     state: State<'_, AppState>,
     input: ops::TransferInput,
 ) -> Result<ops::TransferOutput, String> {
-    let path = err_to_string(state.resolve_current_path())?;
-    err_to_string(ops::transfer(&path, input).await)
+    let mut wf = err_to_string(state.load_current())?;
+    let out = err_to_string(ops::transfer(&mut wf, input).await)?;
+    err_to_string(state.save_current(&wf))?;
+    Ok(out)
 }
 
 // ---------- Balance / verification ----------
@@ -146,8 +163,8 @@ pub async fn balance(
     state: State<'_, AppState>,
     input: ops::BalanceInput,
 ) -> Result<ops::BalanceOutput, String> {
-    let path = err_to_string(state.resolve_current_path())?;
-    err_to_string(ops::balance(&path, input).await)
+    let wf = err_to_string(state.load_current())?;
+    err_to_string(ops::balance(&wf, input).await)
 }
 
 #[tauri::command]
@@ -155,24 +172,24 @@ pub async fn verify_balance(
     state: State<'_, AppState>,
     input: ops::VerifyBalanceInput,
 ) -> Result<ops::VerifyBalanceOutput, String> {
-    let path = err_to_string(state.resolve_current_path())?;
-    err_to_string(ops::verify_balance(&path, input).await)
+    let wf = err_to_string(state.load_current())?;
+    err_to_string(ops::verify_balance(&wf, input).await)
 }
 
 #[tauri::command]
 pub async fn sequencer_head(
     state: State<'_, AppState>,
 ) -> Result<hodl_core::rpc::HeadResponse, String> {
-    let path = err_to_string(state.resolve_current_path())?;
-    err_to_string(ops::sequencer_head(&path).await)
+    let wf = err_to_string(state.load_current())?;
+    err_to_string(ops::sequencer_head(&wf).await)
 }
 
 #[tauri::command]
 pub async fn light_head(
     state: State<'_, AppState>,
 ) -> Result<ops::LightHeadOutput, String> {
-    let path = err_to_string(state.resolve_current_path())?;
-    err_to_string(ops::light_head(&path).await)
+    let wf = err_to_string(state.load_current())?;
+    err_to_string(ops::light_head(&wf).await)
 }
 
 #[tauri::command]
@@ -180,8 +197,10 @@ pub async fn light_balance(
     state: State<'_, AppState>,
     input: ops::LightBalanceInput,
 ) -> Result<ops::LightBalanceOutput, String> {
-    let path = err_to_string(state.resolve_current_path())?;
-    err_to_string(ops::light_balance(&path, input).await)
+    let mut wf = err_to_string(state.load_current())?;
+    let out = err_to_string(ops::light_balance(&mut wf, input).await)?;
+    err_to_string(state.save_current(&wf))?;
+    Ok(out)
 }
 
 // ---------- Reclaim ----------
@@ -190,8 +209,8 @@ pub async fn light_balance(
 pub async fn list_reclaimable_mints(
     state: State<'_, AppState>,
 ) -> Result<Vec<ops::ReclaimableMint>, String> {
-    let path = err_to_string(state.resolve_current_path())?;
-    err_to_string(ops::list_reclaimable_mints(&path).await)
+    let wf = err_to_string(state.load_current())?;
+    err_to_string(ops::list_reclaimable_mints(&wf).await)
 }
 
 #[tauri::command]
@@ -199,6 +218,8 @@ pub async fn reclaim_mint(
     state: State<'_, AppState>,
     input: ops::ReclaimMintInput,
 ) -> Result<ops::ReclaimMintOutput, String> {
-    let path = err_to_string(state.resolve_current_path())?;
-    err_to_string(ops::reclaim_mint(&path, input).await)
+    let mut wf = err_to_string(state.load_current())?;
+    let out = err_to_string(ops::reclaim_mint(&mut wf, input).await)?;
+    err_to_string(state.save_current(&wf))?;
+    Ok(out)
 }

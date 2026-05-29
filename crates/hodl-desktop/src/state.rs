@@ -1,4 +1,5 @@
 use anyhow::{anyhow, Context, Result};
+use hodl_wallet::wallet::WalletFile;
 use hodl_wallet::wallets;
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -51,5 +52,20 @@ impl AppState {
             .as_ref()
             .ok_or_else(|| anyhow!("no wallet selected — pick or create one first"))?;
         wallets::wallet_path_for(&self.wallets_dir, name)
+    }
+
+    /// Load the currently-selected wallet from disk. The two-step
+    /// load-then-call-op-then-save pattern lives at this boundary so
+    /// the ops layer stays oblivious to how wallets are persisted.
+    /// Encryption support will hook in here later (see plan H3).
+    pub fn load_current(&self) -> Result<WalletFile> {
+        let path = self.resolve_current_path()?;
+        WalletFile::load(&path)
+    }
+
+    /// Persist a wallet back to the currently-selected slot.
+    pub fn save_current(&self, wf: &WalletFile) -> Result<()> {
+        let path = self.resolve_current_path()?;
+        wf.save(&path)
     }
 }
