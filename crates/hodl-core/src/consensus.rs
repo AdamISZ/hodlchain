@@ -1,8 +1,8 @@
 //! Network-wide consensus constants and the mint function.
 //!
-//! See `~/code/hodlchain-paper/hodlchainv2.tex` for the derivation of
-//! `mint_fn` and the two-leaf taproot construction (NUMS internal key
-//! + L_spend + L_data).
+//! See the design paper at <https://github.com/AdamISZ/hodlchain-paper>
+//! for the derivation of `mint_fn` and the two-leaf taproot
+//! construction (NUMS internal key + L_spend + L_data).
 
 use bitcoin::secp256k1::XOnlyPublicKey;
 use sha2::{Digest, Sha256};
@@ -76,10 +76,10 @@ pub const BLOCKS_PER_YEAR: u32 = 52_560;
 ///
 /// Fixed at `1 / BLOCKS_PER_YEAR`, i.e. the inflection point of the
 /// mint sigmoid is at `T = 1 year`. There is no retargeting in this
-/// design — `r` is a hard-coded consensus constant. The paper's
+/// design — `r` is a hard-coded consensus constant. The design paper's
 /// trilemma argument (anti-gaming, immediate-mint, supply-control:
 /// pick two) motivates dropping supply-rate control in exchange for
-/// the other two; see §"Setting r" of `hodlchainv2.tex`.
+/// the other two.
 pub const R: f64 = 1.0 / (BLOCKS_PER_YEAR as f64);
 
 /// L2 native-token atomic unit per BTC sat. The mint function returns

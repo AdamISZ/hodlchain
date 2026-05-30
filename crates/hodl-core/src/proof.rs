@@ -151,9 +151,9 @@ pub struct OutpointProof {
     pub lock_blocks: u32,
     /// L1 block height the locker claims to be submitting at. The
     /// verifier requires `T_create ≤ claimed_height < T_create + T`
-    /// (active lock period, paper §3) and `claimed_height ≤ L1 tip`.
-    /// Bound into the sighash so a stale request can't be replayed
-    /// outside its claimed window.
+    /// (the active lock period defined by the design paper) and
+    /// `claimed_height ≤ L1 tip`. Bound into the sighash so a stale
+    /// request can't be replayed outside its claimed window.
     pub claimed_block_height: u32,
     /// Schnorr signature over `sha256("hodl-mint-v1" || outpoint || claimed_block_height_be || l2_destination)`.
     #[cfg_attr(feature = "std", schema(value_type = String))]
@@ -219,7 +219,7 @@ impl MintProof for OutpointProof {
             });
         }
 
-        // 2. Active lock period (paper §3 verification): the
+        // 2. Active lock period (per the design paper): the
         //    claimed_block_height must lie in the half-open interval
         //    [T_create, T_create + T), and must not exceed the
         //    current L1 tip (no future-dated mints).

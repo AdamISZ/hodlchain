@@ -1,6 +1,7 @@
 //! hodl-core: shared types and consensus rules for the hodlchain POC.
 //!
-//! See `docs/design.md` and `docs/issuance.tex`.
+//! See `docs/design.md` and the design paper at
+//! <https://github.com/AdamISZ/hodlchain-paper>.
 //!
 //! Compiles with `default-features = false` (no `std`): the state
 //! machine, SMT, hashing, types, and proof verification are all

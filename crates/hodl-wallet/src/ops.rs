@@ -609,8 +609,9 @@ pub async fn mint_message(wf: &mut WalletFile, input: MintMessageInput) -> Resul
     // Sign the mint message with the L1 mint key that the mint UTXO
     // commits to (via `user_pk` in L_spend). The signed message
     // includes the current L1 tip height as `claimed_block_height`
-    // (paper §3, `m = (outpoint, h, L2-destination)`), so the
-    // verifier can enforce the active-lock-period bound.
+    // (the `m = (outpoint, h, L2-destination)` form defined by the
+    // design paper), so the verifier can enforce the
+    // active-lock-period bound.
     let mint_kp = wf.mint_keypair(&secp, record.bip32_index)?;
     let mint_xonly = mint_kp.x_only_public_key().0;
     let esplora = EsploraClient::new(wf.esplora_url.clone());

@@ -31,3 +31,11 @@ docs/*.tex
 # documents internal flow). Keep on disk, do not push.
 docs/release.md
 docs/gui-review-plan.md
+
+# Maintainer-only macOS release-test installers. Useful for grabbing
+# a CI artifact and installing it locally; not appropriate for the
+# repo because they hard-code AdamISZ/hodlchain artifact naming and
+# would mislead non-aarch64 / non-macOS contributors. See the
+# discussion in the H3 review thread for full reasoning.
+scripts/install-macos-dmg.sh
+scripts/install-macos-backend.sh
